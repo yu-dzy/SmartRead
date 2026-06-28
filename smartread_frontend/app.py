@@ -10,6 +10,7 @@ try:
         generate_chapter_summary_from_api,
         get_chapter_boundaries_from_api,
         get_chapter_summary_from_api,
+        get_citation_evidence_from_api,
         get_uploaded_books,
         save_chapter_boundaries_to_api,
         upload_pdf_to_api,
@@ -25,6 +26,7 @@ except ModuleNotFoundError as error:
         generate_chapter_summary_from_api,
         get_chapter_boundaries_from_api,
         get_chapter_summary_from_api,
+        get_citation_evidence_from_api,
         get_uploaded_books,
         save_chapter_boundaries_to_api,
         upload_pdf_to_api,
@@ -163,7 +165,7 @@ def main() -> None:
 
     with right:
         st.markdown("## Evidence")
-        st.markdown("Clicked source excerpts will appear here.")
+        _render_evidence_panel(api_url=api_url)
         st.markdown("## Mastery")
         st.markdown("Quiz progress and missed concepts will appear here.")
 
@@ -288,7 +290,12 @@ def _render_summary_tab(*, api_url: str, books_result: object | None) -> None:
                 st.session_state[result_key] = summary_result
 
             if result_key in st.session_state:
-                _render_chapter_summary_result(st.session_state[result_key])
+                _render_chapter_summary_result(
+                    st.session_state[result_key],
+                    api_url=api_url,
+                    book_id=int(book["id"]),
+                    chapter_number=chapter_number,
+                )
 
 
 def _load_accepted_chapters_for_summary(
@@ -321,7 +328,13 @@ def _load_accepted_chapters_for_summary(
     return accepted_chapters_by_book
 
 
-def _render_chapter_summary_result(result: object) -> None:
+def _render_chapter_summary_result(
+    result: object,
+    *,
+    api_url: str,
+    book_id: int,
+    chapter_number: int,
+) -> None:
     if not result.success:
         st.error(result.message)
         st.markdown(result.message)
@@ -335,13 +348,95 @@ def _render_chapter_summary_result(result: object) -> None:
     central_argument = summary.get("central_argument", {})
     if central_argument:
         st.markdown(f"Central argument: {central_argument['claim']}")
-        st.markdown(f"Citations: {', '.join(central_argument['citation_ids'])}")
+        _render_citation_controls(
+            api_url=api_url,
+            book_id=book_id,
+            chapter_number=chapter_number,
+            citation_ids=central_argument["citation_ids"],
+            key_prefix="central",
+        )
 
     supporting_ideas = summary.get("supporting_ideas", [])
     if supporting_ideas:
         st.markdown("Supporting ideas")
-        for idea in supporting_ideas:
-            st.markdown(f"- {idea['claim']} ({', '.join(idea['citation_ids'])})")
+        for index, idea in enumerate(supporting_ideas, start=1):
+            st.markdown(f"- {idea['claim']}")
+            _render_citation_controls(
+                api_url=api_url,
+                book_id=book_id,
+                chapter_number=chapter_number,
+                citation_ids=idea["citation_ids"],
+                key_prefix=f"idea_{index}",
+            )
+
+
+def _render_citation_controls(
+    *,
+    api_url: str,
+    book_id: int,
+    chapter_number: int,
+    citation_ids: list[str],
+    key_prefix: str,
+) -> None:
+    for citation_id in citation_ids:
+        if st.button(
+            f"Citation {citation_id}",
+            key=f"citation_{book_id}_{chapter_number}_{key_prefix}_{citation_id}",
+        ):
+            st.session_state["selected_evidence_request"] = {
+                "book_id": book_id,
+                "chapter_number": chapter_number,
+                "citation_id": citation_id,
+            }
+            with st.spinner("Loading evidence..."):
+                st.session_state["selected_evidence"] = get_citation_evidence_from_api(
+                    api_url,
+                    book_id=book_id,
+                    chapter_number=chapter_number,
+                    citation_id=citation_id,
+                )
+
+
+def _render_evidence_panel(*, api_url: str) -> None:
+    evidence = st.session_state.get("selected_evidence")
+    if evidence is None:
+        st.markdown("Click a Summary citation to inspect its source excerpt.")
+        return
+
+    if not evidence.success:
+        st.error(evidence.message)
+        st.markdown(evidence.message)
+        if evidence.retryable:
+            request = st.session_state.get("selected_evidence_request")
+            if st.button(f"Retry evidence {evidence.citation_id}", key="retry_evidence"):
+                with st.spinner("Loading evidence..."):
+                    st.session_state["selected_evidence"] = get_citation_evidence_from_api(
+                        api_url,
+                        book_id=int(request["book_id"]),
+                        chapter_number=int(request["chapter_number"]),
+                        citation_id=str(request["citation_id"]),
+                    )
+                evidence = st.session_state["selected_evidence"]
+            else:
+                st.markdown("Retry loading evidence after FastAPI is available.")
+                return
+        else:
+            return
+
+    if evidence.verification_status != "verified":
+        st.warning("Unverified evidence")
+        st.markdown(evidence.message)
+        if evidence.source_location:
+            st.markdown(f"Source location: {evidence.source_location}")
+        if evidence.page_number:
+            st.markdown(f"Page {evidence.page_number}")
+        return
+
+    st.markdown("Verified evidence")
+    st.markdown(f"Citation {evidence.citation_id}")
+    st.markdown(f"Source location: {evidence.source_location}")
+    st.markdown(f"Page {evidence.page_number}")
+    st.markdown(evidence.source_excerpt)
 
 
 def _merge_first_two_chapters(chapters: list[dict[str, object]]) -> list[dict[str, object]]:

@@ -9,6 +9,7 @@ from smartread_frontend.uploads import (
     ChapterBoundaryReviewResult,
     ChapterDetectionResult,
     ChapterSummaryResult,
+    CitationEvidenceResult,
     ExtractionResult,
     UploadResult,
 )
@@ -857,3 +858,280 @@ def test_streamlit_loads_persisted_chapter_summary(monkeypatch):
 
     assert "Summary loaded for Chapter 1: Persisted Focus." in page_text
     assert "Persisted summaries should be visible after restart." in page_text
+
+
+def test_streamlit_clicking_summary_citation_updates_evidence_panel(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 16,
+            "original_filename": "clickable-citations.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 16,
+            "chapter_number": 1,
+            "title": "Evidence Focus",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:16:page:1",
+            "end_source_location": "book:16:page:2",
+            "review_status": "accepted",
+        }
+    ]
+    loaded_evidence: dict[str, object] = {}
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    def fake_get_chapter_summary_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> ChapterSummaryResult:
+        return ChapterSummaryResult(
+            success=True,
+            message="Summary loaded for Chapter 1: Evidence Focus.",
+            chapter=accepted_chapters[0],
+            generation_status="generated",
+            summary={
+                "central_argument": {
+                    "claim": "Focus improves when attention is protected.",
+                    "citation_ids": ["c1"],
+                },
+                "supporting_ideas": [],
+                "citations": [
+                    {
+                        "id": "c1",
+                        "source_location": "book:16:page:1",
+                        "page_number": 1,
+                        "source_excerpt": "Focus improves when attention is protected.",
+                    }
+                ],
+            },
+        )
+
+    def fake_get_citation_evidence_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+        citation_id: str,
+    ) -> CitationEvidenceResult:
+        loaded_evidence["book_id"] = book_id
+        loaded_evidence["chapter_number"] = chapter_number
+        loaded_evidence["citation_id"] = citation_id
+        return CitationEvidenceResult(
+            success=True,
+            message="Citation c1 is verified.",
+            citation_id="c1",
+            verification_status="verified",
+            source_location="book:16:page:1",
+            page_number=1,
+            source_excerpt="Focus improves when attention is protected.",
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_summary_from_api",
+        fake_get_chapter_summary_from_api,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "get_citation_evidence_from_api",
+        fake_get_citation_evidence_from_api,
+    )
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    citation_button = next(button for button in app.button if button.label == "Citation c1")
+    citation_button.click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert loaded_evidence == {"book_id": 16, "chapter_number": 1, "citation_id": "c1"}
+    assert "Focus improves when attention is protected." in page_text
+    assert "Verified evidence" in page_text
+    assert "Page 1" in page_text
+    assert "book:16:page:1" in page_text
+
+
+def test_streamlit_evidence_error_can_retry_same_citation(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 17,
+            "original_filename": "retry-evidence.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 17,
+            "chapter_number": 1,
+            "title": "Retry Evidence",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:17:page:1",
+            "end_source_location": "book:17:page:2",
+            "review_status": "accepted",
+        }
+    ]
+    evidence_results = [
+        CitationEvidenceResult(
+            success=False,
+            message="Evidence could not be loaded. Check the FastAPI backend, then try again.",
+            citation_id="c1",
+            retryable=True,
+        ),
+        CitationEvidenceResult(
+            success=True,
+            message="Citation c1 is verified.",
+            citation_id="c1",
+            verification_status="verified",
+            source_location="book:17:page:1",
+            page_number=1,
+            source_excerpt="Retry loads the same focused excerpt.",
+        ),
+    ]
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    def fake_get_chapter_summary_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> ChapterSummaryResult:
+        return ChapterSummaryResult(
+            success=True,
+            message="Summary loaded for Chapter 1: Retry Evidence.",
+            chapter=accepted_chapters[0],
+            generation_status="generated",
+            summary={
+                "central_argument": {
+                    "claim": "Retry keeps the learner in the current chapter.",
+                    "citation_ids": ["c1"],
+                },
+                "supporting_ideas": [],
+                "citations": [
+                    {
+                        "id": "c1",
+                        "source_location": "book:17:page:1",
+                        "page_number": 1,
+                        "source_excerpt": "Retry loads the same focused excerpt.",
+                    }
+                ],
+            },
+        )
+
+    def fake_get_citation_evidence_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+        citation_id: str,
+    ) -> CitationEvidenceResult:
+        return evidence_results.pop(0)
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_summary_from_api",
+        fake_get_chapter_summary_from_api,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "get_citation_evidence_from_api",
+        fake_get_citation_evidence_from_api,
+    )
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    citation_button = next(button for button in app.button if button.label == "Citation c1")
+    citation_button.click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+    assert "Evidence could not be loaded. Check the FastAPI backend, then try again." in page_text
+    assert "Retry keeps the learner in the current chapter." in page_text
+
+    retry_button = next(button for button in app.button if button.label == "Retry evidence c1")
+    retry_button.click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+    assert "Retry loads the same focused excerpt." in page_text
+    assert "Verified evidence" in page_text

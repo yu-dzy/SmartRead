@@ -257,6 +257,152 @@ def test_openai_generation_requires_api_key_and_uses_defined_default_model(tmp_p
     assert detail["summary"]["model"] == "gpt-5.5"
 
 
+def test_resolve_persisted_summary_citation_to_focused_evidence_after_restart(tmp_path):
+    generator = FakeSummaryGenerator(
+        {
+            "central_argument": {
+                "claim": "Focus improves when attention is protected from constant switching.",
+                "citation_ids": ["c1"],
+            },
+            "supporting_ideas": [
+                {
+                    "claim": "Protected attention makes deep work possible.",
+                    "citation_ids": ["c1"],
+                }
+            ],
+            "citations": [
+                {
+                    "id": "c1",
+                    "source_location": "book:1:page:1",
+                    "page_number": 1,
+                    "source_excerpt": "Focus improves when attention is protected from constant switching.",
+                }
+            ],
+        }
+    )
+    database_path = tmp_path / "smartread.db"
+    client = TestClient(create_app(database_path=database_path, summary_generator=generator))
+    book_id = _upload_extract_and_accept_chapter(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/summary")
+
+    reloaded_client = TestClient(create_app(database_path=database_path, summary_generator=generator))
+    response = reloaded_client.get(
+        f"/books/{book_id}/chapter-boundaries/1/summary/citations/c1/evidence"
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "book_id": book_id,
+        "chapter_number": 1,
+        "citation_id": "c1",
+        "verification_status": "verified",
+        "message": "Citation c1 is verified.",
+        "source_location": f"book:{book_id}:page:1",
+        "page_number": 1,
+        "source_excerpt": "Focus improves when attention is protected from constant switching.",
+    }
+    assert "Protected attention makes deep work possible for learners." not in response.text
+
+
+def test_citation_outside_current_accepted_boundary_returns_unverified_evidence(tmp_path):
+    generator = FakeSummaryGenerator(
+        {
+            "central_argument": {
+                "claim": "Focus improves when attention is protected from constant switching.",
+                "citation_ids": ["c1"],
+            },
+            "supporting_ideas": [
+                {
+                    "claim": "Protected attention makes deep work possible.",
+                    "citation_ids": ["c2"],
+                }
+            ],
+            "citations": [
+                {
+                    "id": "c1",
+                    "source_location": "book:1:page:1",
+                    "page_number": 1,
+                    "source_excerpt": "Focus improves when attention is protected from constant switching.",
+                },
+                {
+                    "id": "c2",
+                    "source_location": "book:1:page:2",
+                    "page_number": 2,
+                    "source_excerpt": "Protected attention makes deep work possible for learners.",
+                },
+            ],
+        }
+    )
+    client = TestClient(create_app(database_path=tmp_path / "smartread.db", summary_generator=generator))
+    book_id = _upload_extract_and_accept_chapter(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/summary")
+    client.put(
+        f"/books/{book_id}/chapter-boundaries",
+        json={
+            "chapters": [
+                {"chapter_number": 1, "title": "Focus Revision", "start_page": 2, "end_page": 2},
+                {"chapter_number": 2, "title": "Recall", "start_page": 3, "end_page": 3},
+            ]
+        },
+    )
+
+    response = client.get(f"/books/{book_id}/chapter-boundaries/1/summary/citations/c1/evidence")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "book_id": book_id,
+        "chapter_number": 1,
+        "citation_id": "c1",
+        "verification_status": "unverified",
+        "message": "Citation c1 no longer points inside the accepted chapter boundary.",
+        "source_location": f"book:{book_id}:page:1",
+        "page_number": 1,
+        "source_excerpt": None,
+    }
+
+
+def test_missing_summary_citation_id_returns_unverified_evidence(tmp_path):
+    generator = FakeSummaryGenerator(
+        {
+            "central_argument": {
+                "claim": "Focus improves when attention is protected from constant switching.",
+                "citation_ids": ["c1"],
+            },
+            "supporting_ideas": [
+                {
+                    "claim": "Protected attention makes deep work possible.",
+                    "citation_ids": ["c1"],
+                }
+            ],
+            "citations": [
+                {
+                    "id": "c1",
+                    "source_location": "book:1:page:1",
+                    "page_number": 1,
+                    "source_excerpt": "Focus improves when attention is protected from constant switching.",
+                }
+            ],
+        }
+    )
+    client = TestClient(create_app(database_path=tmp_path / "smartread.db", summary_generator=generator))
+    book_id = _upload_extract_and_accept_chapter(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/summary")
+
+    response = client.get(f"/books/{book_id}/chapter-boundaries/1/summary/citations/bad-id/evidence")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "book_id": book_id,
+        "chapter_number": 1,
+        "citation_id": "bad-id",
+        "verification_status": "unverified",
+        "message": "Citation bad-id could not be verified.",
+        "source_location": None,
+        "page_number": None,
+        "source_excerpt": None,
+    }
+
+
 class CyclingSummaryGenerator:
     provider = "test"
     model = "fake"
