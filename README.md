@@ -2,7 +2,7 @@
 
 SmartRead is a private learning system for cited chapter lessons, active recall, and targeted review.
 
-## Issue #10 Quiz Feedback Slice
+## Issue #11 Missed Concepts Slice
 
 Start the FastAPI backend:
 
@@ -39,6 +39,8 @@ Use the Quiz tab to generate exactly five grounded quiz questions for the select
 
 After a quiz is generated, answer each objective question in the Quiz tab. FastAPI grades the submitted answer deterministically in application code, persists the submitted answer, returns immediate correct/incorrect feedback, and includes the correct answer, explanation, tested Core Concept, citation, source page, and source excerpt. Saved quiz progress reloads after restart and updates the Study Console Mastery panel.
 
+Incorrect objective answers create Missed Concepts linked to the tested Core Concept, quiz question, chapter, saved answer attempt, explanation, and supporting citation. Correct answers do not create Missed Concepts. Duplicate misses for the same concept are collapsed into one chapter-level Missed Concept, and persisted Missed Concepts reload in the Review tab after restart.
+
 Real Summary, Core Concepts, Key Takeaways, and Quiz generation use OpenAI by default with model `gpt-5.5`. Set the API key before starting FastAPI:
 
 ```powershell
@@ -51,7 +53,7 @@ To override the default model:
 $env:SMARTREAD_OPENAI_MODEL = "gpt-5.5"
 ```
 
-Missed concepts and review queues are not implemented yet.
+Retrying missed questions and spaced review queues are not implemented yet.
 
 By default, metadata is saved at `.smartread/smartread.db`. To use another database file:
 

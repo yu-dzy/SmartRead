@@ -883,6 +883,22 @@ class UploadedBookStore:
                     submitted_at,
                 ),
             )
+            answer_row = self._fetch_quiz_answer_row(
+                connection,
+                book_id,
+                chapter_number,
+                question_id,
+            )
+            if not is_correct:
+                self._save_missed_concept(
+                    connection=connection,
+                    book_id=book_id,
+                    chapter_number=chapter_number,
+                    question=question,
+                    quiz_answer_id=answer_row["id"],
+                    citation=citation,
+                    created_at=submitted_at,
+                )
             answer_rows = self._fetch_quiz_answer_rows(connection, book_id, chapter_number)
 
         return self._build_quiz_answer_feedback(
@@ -894,6 +910,41 @@ class UploadedBookStore:
             citation=citation,
             progress=self._build_quiz_progress(answer_rows, total_questions=len(quiz["questions"])),
         )
+
+    def list_missed_concepts(
+        self,
+        book_id: int,
+        chapter_number: int,
+    ) -> dict[str, Any]:
+        self.get_accepted_chapter_source_pages(book_id, chapter_number)
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    book_id,
+                    chapter_number,
+                    concept_name,
+                    question_id,
+                    quiz_answer_id,
+                    explanation,
+                    citation_id,
+                    source_location,
+                    page_number,
+                    source_excerpt
+                FROM missed_concepts
+                WHERE book_id = ? AND chapter_number = ?
+                ORDER BY concept_name
+                """,
+                (book_id, chapter_number),
+            ).fetchall()
+
+        missed_concepts = [self._to_missed_concept(row) for row in rows]
+        return {
+            "book_id": book_id,
+            "chapter_number": chapter_number,
+            "summary": {"missed_concept_count": len(missed_concepts)},
+            "missed_concepts": missed_concepts,
+        }
 
     def get_quiz_progress(
         self,
@@ -1158,6 +1209,27 @@ class UploadedBookStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS missed_concepts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    book_id INTEGER NOT NULL,
+                    chapter_number INTEGER NOT NULL,
+                    concept_name TEXT NOT NULL,
+                    question_id TEXT NOT NULL,
+                    quiz_answer_id INTEGER NOT NULL,
+                    explanation TEXT NOT NULL,
+                    citation_id TEXT NOT NULL,
+                    source_location TEXT,
+                    page_number INTEGER,
+                    source_excerpt TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(book_id, chapter_number, concept_name),
+                    FOREIGN KEY(book_id) REFERENCES uploaded_books(id),
+                    FOREIGN KEY(quiz_answer_id) REFERENCES quiz_answers(id)
+                )
+                """
+            )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)
@@ -1287,6 +1359,20 @@ class UploadedBookStore:
             "quiz": json.loads(quiz_json) if quiz_json else None,
         }
 
+    def _to_missed_concept(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "book_id": row["book_id"],
+            "chapter_number": row["chapter_number"],
+            "concept_name": row["concept_name"],
+            "question_id": row["question_id"],
+            "quiz_answer_id": row["quiz_answer_id"],
+            "explanation": row["explanation"],
+            "citation_id": row["citation_id"],
+            "source_location": row["source_location"],
+            "page_number": row["page_number"],
+            "source_excerpt": row["source_excerpt"],
+        }
+
     def _find_quiz_question(
         self,
         quiz: dict[str, Any],
@@ -1315,13 +1401,81 @@ class UploadedBookStore:
     ) -> list[sqlite3.Row]:
         return connection.execute(
             """
-            SELECT question_id, selected_answer, is_correct, submitted_at
+            SELECT id, question_id, selected_answer, is_correct, submitted_at
             FROM quiz_answers
             WHERE book_id = ? AND chapter_number = ?
             ORDER BY submitted_at, question_id
             """,
             (book_id, chapter_number),
         ).fetchall()
+
+    def _fetch_quiz_answer_row(
+        self,
+        connection: sqlite3.Connection,
+        book_id: int,
+        chapter_number: int,
+        question_id: str,
+    ) -> sqlite3.Row:
+        return connection.execute(
+            """
+            SELECT id, question_id, selected_answer, is_correct, submitted_at
+            FROM quiz_answers
+            WHERE book_id = ? AND chapter_number = ? AND question_id = ?
+            """,
+            (book_id, chapter_number, question_id),
+        ).fetchone()
+
+    def _save_missed_concept(
+        self,
+        *,
+        connection: sqlite3.Connection,
+        book_id: int,
+        chapter_number: int,
+        question: dict[str, Any],
+        quiz_answer_id: int,
+        citation: dict[str, Any] | None,
+        created_at: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO missed_concepts (
+                book_id,
+                chapter_number,
+                concept_name,
+                question_id,
+                quiz_answer_id,
+                explanation,
+                citation_id,
+                source_location,
+                page_number,
+                source_excerpt,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(book_id, chapter_number, concept_name)
+            DO UPDATE SET
+                question_id = excluded.question_id,
+                quiz_answer_id = excluded.quiz_answer_id,
+                explanation = excluded.explanation,
+                citation_id = excluded.citation_id,
+                source_location = excluded.source_location,
+                page_number = excluded.page_number,
+                source_excerpt = excluded.source_excerpt
+            """,
+            (
+                book_id,
+                chapter_number,
+                question["tested_concept"],
+                question["id"],
+                quiz_answer_id,
+                question["explanation"],
+                question["citation_id"],
+                citation["source_location"] if citation else None,
+                citation["page_number"] if citation else None,
+                citation["source_excerpt"] if citation else None,
+                created_at,
+            ),
+        )
 
     def _build_quiz_answer_feedback(
         self,

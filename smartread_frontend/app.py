@@ -15,6 +15,7 @@ try:
         get_chapter_summary_from_api,
         get_citation_evidence_from_api,
         get_concepts_takeaways_from_api,
+        get_missed_concepts_from_api,
         get_quiz_progress_from_api,
         get_quiz_from_api,
         get_uploaded_books,
@@ -37,6 +38,7 @@ except ModuleNotFoundError as error:
         get_chapter_summary_from_api,
         get_citation_evidence_from_api,
         get_concepts_takeaways_from_api,
+        get_missed_concepts_from_api,
         get_quiz_progress_from_api,
         get_quiz_from_api,
         get_uploaded_books,
@@ -174,7 +176,7 @@ def main() -> None:
         with quiz_tab:
             _render_quiz_tab(api_url=api_url, books_result=books_result)
         with review_tab:
-            st.markdown("Missed-concept review will be generated in a later MVP slice.")
+            _render_review_tab(api_url=api_url, books_result=books_result)
 
     with right:
         st.markdown("## Evidence")
@@ -513,6 +515,78 @@ def _render_quiz_tab(*, api_url: str, books_result: object | None) -> None:
                 )
 
 
+def _render_review_tab(*, api_url: str, books_result: object | None) -> None:
+    accepted_chapters_by_book = _load_accepted_chapters_for_summary(
+        api_url=api_url,
+        books_result=books_result,
+    )
+    if not accepted_chapters_by_book:
+        st.markdown("No missed concepts are due from checked answers.")
+        return
+
+    any_missed_concepts = False
+    for book, chapters in accepted_chapters_by_book:
+        for chapter in chapters:
+            chapter_number = int(chapter["chapter_number"])
+            st.markdown(
+                f"**{book['original_filename']} - "
+                f"Chapter {chapter_number}: {chapter['title']}**"
+            )
+            result = _load_missed_concepts_result(
+                api_url=api_url,
+                book_id=int(book["id"]),
+                chapter_number=chapter_number,
+            )
+            if result is not None and result.success and result.missed_concepts:
+                any_missed_concepts = True
+            if result is not None:
+                _render_missed_concepts_result(result)
+
+    if not any_missed_concepts:
+        st.markdown("No missed concepts are due from checked answers.")
+
+
+def _load_missed_concepts_result(
+    *,
+    api_url: str,
+    book_id: int,
+    chapter_number: int,
+) -> object | None:
+    result_key = f"missed_concepts_{book_id}_{chapter_number}"
+    if result_key not in st.session_state:
+        with st.spinner("Loading Missed Concepts..."):
+            st.session_state[result_key] = get_missed_concepts_from_api(
+                api_url,
+                book_id=book_id,
+                chapter_number=chapter_number,
+            )
+
+    return st.session_state.get(result_key)
+
+
+def _render_missed_concepts_result(result: object) -> None:
+    if not result.success:
+        st.error(result.message)
+        st.markdown(result.message)
+        if result.retryable:
+            st.markdown("Retry loading Missed Concepts after FastAPI recovers.")
+        return
+
+    if not result.missed_concepts:
+        return
+
+    st.markdown("### Missed Concepts")
+    for concept in result.missed_concepts:
+        st.markdown(f"**{concept['concept_name']}**")
+        st.markdown(f"Question: {concept['question_id']}")
+        st.markdown(concept["explanation"])
+        st.markdown(f"Citation {concept['citation_id']}")
+        if concept.get("page_number"):
+            st.markdown(f"Page {concept['page_number']}")
+        if concept.get("source_excerpt"):
+            st.markdown(f"Source excerpt: {concept['source_excerpt']}")
+
+
 def _load_quiz_result(
     *,
     api_url: str,
@@ -637,6 +711,7 @@ def _store_quiz_answer_feedback(
     answer_result: object,
 ) -> None:
     progress_key = f"quiz_progress_{book_id}_{chapter_number}"
+    missed_concepts_key = f"missed_concepts_{book_id}_{chapter_number}"
     progress_result = st.session_state.get(progress_key)
     answer = {
         "question_id": answer_result.question_id,
@@ -659,6 +734,8 @@ def _store_quiz_answer_feedback(
             answers=[answer],
             retryable=False,
         )
+        if answer_result.is_correct is False:
+            st.session_state.pop(missed_concepts_key, None)
         return
 
     answers = [
@@ -674,6 +751,8 @@ def _store_quiz_answer_feedback(
         answers=answers,
         retryable=False,
     )
+    if answer_result.is_correct is False:
+        st.session_state.pop(missed_concepts_key, None)
 
 
 def _render_quiz_answer_feedback(answer: dict[str, object]) -> None:
@@ -702,7 +781,7 @@ def _render_mastery_panel() -> None:
     st.markdown(f"Answered: {progress['answered_count']} of {progress['total_questions']}")
     st.markdown(f"Correct: {progress['correct_count']}")
     st.markdown(f"Incorrect: {progress['incorrect_count']}")
-    st.markdown("Missed-concept review will be generated in a later MVP slice.")
+    st.markdown("Missed Concepts appear in the Review tab.")
 
 
 def _load_accepted_chapters_for_summary(

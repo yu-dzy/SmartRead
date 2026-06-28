@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from smartread_frontend.health import ApiStatus
@@ -12,6 +13,7 @@ from smartread_frontend.uploads import (
     CitationEvidenceResult,
     ConceptsTakeawaysResult,
     ExtractionResult,
+    MissedConceptsResult,
     QuizAnswerResult,
     QuizProgressResult,
     QuizResult,
@@ -51,6 +53,32 @@ def _empty_quiz_progress_result(
             "total_questions": 5,
         },
         answers=[],
+    )
+
+
+def _empty_missed_concepts_result(
+    api_base_url: str,
+    *,
+    book_id: int,
+    chapter_number: int,
+) -> MissedConceptsResult:
+    return MissedConceptsResult(
+        success=True,
+        message="Missed Concepts loaded.",
+        summary={"missed_concept_count": 0},
+        missed_concepts=[],
+    )
+
+
+@pytest.fixture(autouse=True)
+def stub_missed_concepts_loader(monkeypatch):
+    import smartread_frontend.uploads as uploads_module
+
+    monkeypatch.setattr(
+        uploads_module,
+        "get_missed_concepts_from_api",
+        _empty_missed_concepts_result,
+        raising=False,
     )
 
 
@@ -2117,6 +2145,38 @@ def test_streamlit_submits_quiz_answer_and_updates_mastery(monkeypatch):
             },
         )
 
+    def fake_get_missed_concepts_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> MissedConceptsResult:
+        if not submitted:
+            return _empty_missed_concepts_result(
+                api_base_url,
+                book_id=book_id,
+                chapter_number=chapter_number,
+            )
+        return MissedConceptsResult(
+            success=True,
+            message="Missed Concepts loaded.",
+            summary={"missed_concept_count": 1},
+            missed_concepts=[
+                {
+                    "book_id": book_id,
+                    "chapter_number": chapter_number,
+                    "concept_name": "Protected Attention",
+                    "question_id": "q1",
+                    "quiz_answer_id": 1,
+                    "explanation": "Protected attention reduces constant switching.",
+                    "citation_id": "qc1",
+                    "source_location": "book:23:page:1",
+                    "page_number": 1,
+                    "source_excerpt": "Protected attention reduces constant switching.",
+                }
+            ],
+        )
+
     monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
     monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
     monkeypatch.setattr(
@@ -2129,6 +2189,11 @@ def test_streamlit_submits_quiz_answer_and_updates_mastery(monkeypatch):
     monkeypatch.setattr(uploads_module, "get_quiz_from_api", fake_get_quiz_from_api)
     monkeypatch.setattr(uploads_module, "get_quiz_progress_from_api", _empty_quiz_progress_result)
     monkeypatch.setattr(uploads_module, "submit_quiz_answer_to_api", fake_submit_quiz_answer_to_api)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_missed_concepts_from_api",
+        fake_get_missed_concepts_from_api,
+    )
 
     app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
     app = AppTest.from_file(str(app_path))
@@ -2156,6 +2221,8 @@ def test_streamlit_submits_quiz_answer_and_updates_mastery(monkeypatch):
     assert "Answered: 1 of 5" in page_text
     assert "Correct: 0" in page_text
     assert "Incorrect: 1" in page_text
+    assert "Missed Concepts" in page_text
+    assert "Question: q1" in page_text
 
 
 def test_streamlit_shows_recoverable_quiz_answer_feedback_failure(monkeypatch):
@@ -2264,6 +2331,202 @@ def test_streamlit_shows_recoverable_quiz_answer_feedback_failure(monkeypatch):
 
     assert "Answer feedback failed. Check the FastAPI backend, then try again." in page_text
     assert "Retry checking this answer after FastAPI recovers." in page_text
+
+
+def test_streamlit_review_tab_loads_missed_concepts(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 26,
+            "original_filename": "missed-review.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 26,
+            "chapter_number": 1,
+            "title": "Missed Review",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:26:page:1",
+            "end_source_location": "book:26:page:2",
+            "review_status": "accepted",
+        }
+    ]
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    def fake_get_missed_concepts_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> MissedConceptsResult:
+        return MissedConceptsResult(
+            success=True,
+            message="Missed Concepts loaded.",
+            summary={"missed_concept_count": 1},
+            missed_concepts=[
+                {
+                    "book_id": book_id,
+                    "chapter_number": chapter_number,
+                    "concept_name": "Protected Attention",
+                    "question_id": "q1",
+                    "quiz_answer_id": 3,
+                    "explanation": "Protected attention reduces constant switching.",
+                    "citation_id": "qc1",
+                    "source_location": "book:26:page:1",
+                    "page_number": 1,
+                    "source_excerpt": "Protected attention reduces constant switching.",
+                }
+            ],
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(uploads_module, "get_chapter_summary_from_api", _empty_summary_result)
+    monkeypatch.setattr(uploads_module, "get_concepts_takeaways_from_api", _empty_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", _empty_quiz_result)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_missed_concepts_from_api",
+        fake_get_missed_concepts_from_api,
+    )
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert "Missed Concepts" in page_text
+    assert "Protected Attention" in page_text
+    assert "Question: q1" in page_text
+    assert "Protected attention reduces constant switching." in page_text
+    assert "Citation qc1" in page_text
+    assert "Source excerpt: Protected attention reduces constant switching." in page_text
+
+
+def test_streamlit_review_tab_shows_recoverable_missed_concepts_error(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 27,
+            "original_filename": "missed-error.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 27,
+            "chapter_number": 1,
+            "title": "Missed Error",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:27:page:1",
+            "end_source_location": "book:27:page:2",
+            "review_status": "accepted",
+        }
+    ]
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    def fake_get_missed_concepts_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> MissedConceptsResult:
+        return MissedConceptsResult(
+            success=False,
+            message="Missed Concepts could not be loaded. Check FastAPI, then try again.",
+            summary={},
+            missed_concepts=[],
+            retryable=True,
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(uploads_module, "get_chapter_summary_from_api", _empty_summary_result)
+    monkeypatch.setattr(uploads_module, "get_concepts_takeaways_from_api", _empty_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", _empty_quiz_result)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_missed_concepts_from_api",
+        fake_get_missed_concepts_from_api,
+    )
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert "Missed Concepts could not be loaded. Check FastAPI, then try again." in page_text
+    assert "Retry loading Missed Concepts after FastAPI recovers." in page_text
 
 
 def test_streamlit_shows_retryable_quiz_generation_failure(monkeypatch):

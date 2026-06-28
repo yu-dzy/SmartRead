@@ -354,6 +354,16 @@ def create_app(
                 detail="Quiz has not been generated yet.",
             ) from None
 
+    @app.get("/books/{book_id}/chapter-boundaries/{chapter_number}/missed-concepts")
+    def list_missed_concepts(book_id: int, chapter_number: int) -> dict[str, object]:
+        try:
+            return store.list_missed_concepts(book_id, chapter_number)
+        except AcceptedChapterNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="Accepted chapter boundary was not found.",
+            ) from None
+
     return app
 
 

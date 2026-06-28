@@ -114,6 +114,15 @@ class QuizProgressResult:
 
 
 @dataclass(frozen=True)
+class MissedConceptsResult:
+    success: bool
+    message: str
+    summary: dict[str, int]
+    missed_concepts: list[dict[str, Any]]
+    retryable: bool = False
+
+
+@dataclass(frozen=True)
 class CitationEvidenceResult:
     success: bool
     message: str
@@ -668,6 +677,46 @@ def get_quiz_progress_from_api(
             message="Quiz progress could not be loaded. Check the FastAPI backend, then try again.",
             progress={},
             answers=[],
+            retryable=True,
+        )
+
+
+def get_missed_concepts_from_api(
+    api_base_url: str,
+    *,
+    book_id: int,
+    chapter_number: int,
+    client: httpx.Client | None = None,
+) -> MissedConceptsResult:
+    http_client = client or httpx.Client(timeout=10.0)
+    try:
+        response = http_client.get(
+            f"{api_base_url.rstrip('/')}/books/{book_id}/chapter-boundaries/"
+            f"{chapter_number}/missed-concepts"
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            return MissedConceptsResult(
+                success=True,
+                message="Missed Concepts loaded.",
+                summary=payload["summary"],
+                missed_concepts=payload["missed_concepts"],
+            )
+
+        detail = response.json().get("detail", {})
+        return MissedConceptsResult(
+            success=False,
+            message=detail if isinstance(detail, str) else "Missed Concepts could not be loaded.",
+            summary={},
+            missed_concepts=[],
+            retryable=response.status_code != 404,
+        )
+    except httpx.HTTPError:
+        return MissedConceptsResult(
+            success=False,
+            message="Missed Concepts could not be loaded. Check FastAPI, then try again.",
+            summary={},
+            missed_concepts=[],
             retryable=True,
         )
 
