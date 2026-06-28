@@ -3,7 +3,12 @@ from pathlib import Path
 from streamlit.testing.v1 import AppTest
 
 from smartread_frontend.health import ApiStatus
-from smartread_frontend.uploads import BookListResult, ExtractionResult, UploadResult
+from smartread_frontend.uploads import (
+    BookListResult,
+    ChapterDetectionResult,
+    ExtractionResult,
+    UploadResult,
+)
 
 
 PDF_BYTES = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
@@ -191,3 +196,212 @@ def test_streamlit_shows_retryable_extraction_failure(monkeypatch):
 
     assert "Text extraction failed. Retry extraction or upload a cleaner PDF." in page_text
     assert "Retry extraction or upload a cleaner PDF." in page_text
+
+
+def test_streamlit_detects_chapters_and_shows_book_map(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 9,
+            "original_filename": "chapters.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-27T12:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "not_started",
+            "chapter_detection_confidence": None,
+            "chapter_detection_message": None,
+        }
+    ]
+
+    chapters = [
+        {
+            "book_id": 9,
+            "chapter_number": 1,
+            "title": "Getting Started",
+            "start_page": 1,
+            "end_page": 3,
+            "start_source_location": "book:9:page:1",
+            "end_source_location": "book:9:page:3",
+            "confidence": "high",
+            "detection_source": "heading_pattern",
+        }
+    ]
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_detect_chapters_from_api(api_base_url: str, *, book_id: int) -> ChapterDetectionResult:
+        uploaded_books[0]["chapter_detection_status"] = "detected"
+        uploaded_books[0]["chapter_detection_confidence"] = "high"
+        return ChapterDetectionResult(
+            success=True,
+            message="Detected 1 chapters with high confidence.",
+            summary={"chapter_count": 1, "confidence": "high", "warning": None},
+            chapters=chapters,
+            book=uploaded_books[0],
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(uploads_module, "detect_chapters_from_api", fake_detect_chapters_from_api)
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    app.button[2].click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert "Detected 1 chapters with high confidence." in page_text
+    assert "Detected Chapters" in page_text
+    assert "1. Getting Started" in page_text
+    assert "Pages 1-3" in page_text
+    assert "Chapter lesson generation remains unavailable until boundaries are reviewed." in page_text
+
+
+def test_streamlit_shows_low_confidence_chapter_detection_warning(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 10,
+            "original_filename": "weak-headings.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-27T12:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "not_started",
+            "chapter_detection_confidence": None,
+            "chapter_detection_message": None,
+        }
+    ]
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_detect_chapters_from_api(api_base_url: str, *, book_id: int) -> ChapterDetectionResult:
+        return ChapterDetectionResult(
+            success=True,
+            message="Detected 1 chapters with low confidence.",
+            summary={
+                "chapter_count": 1,
+                "confidence": "low",
+                "warning": "Chapter detection confidence is low. Review boundaries before generating lessons.",
+            },
+            chapters=[
+                {
+                    "book_id": book_id,
+                    "chapter_number": 1,
+                    "title": "Foundations",
+                    "start_page": 1,
+                    "end_page": 2,
+                    "start_source_location": "book:10:page:1",
+                    "end_source_location": "book:10:page:2",
+                    "confidence": "low",
+                    "detection_source": "numbered_heading_pattern",
+                }
+            ],
+            book=uploaded_books[0],
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(uploads_module, "detect_chapters_from_api", fake_detect_chapters_from_api)
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    app.button[2].click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert "Detected 1 chapters with low confidence." in page_text
+    assert "Chapter detection confidence is low. Review boundaries before generating lessons." in page_text
+    assert "1. Foundations" in page_text
+
+
+def test_streamlit_shows_empty_state_when_no_chapters_are_detected(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 11,
+            "original_filename": "essay.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-27T12:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "not_started",
+            "chapter_detection_confidence": None,
+            "chapter_detection_message": None,
+        }
+    ]
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_detect_chapters_from_api(api_base_url: str, *, book_id: int) -> ChapterDetectionResult:
+        return ChapterDetectionResult(
+            success=True,
+            message="No chapters could be detected. Manual chapter review will be required.",
+            summary={
+                "chapter_count": 0,
+                "confidence": "none",
+                "warning": "No chapters could be detected. Manual chapter review will be required.",
+            },
+            chapters=[],
+            book=uploaded_books[0],
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(uploads_module, "detect_chapters_from_api", fake_detect_chapters_from_api)
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    app.button[2].click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert "No chapters could be detected." in page_text
+    assert "Manual chapter review will be required before lessons." in page_text
+    assert "Chapter lesson generation remains unavailable until boundaries are reviewed." in page_text

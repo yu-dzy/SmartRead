@@ -84,6 +84,20 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
         except UploadedBookNotFoundError:
             raise HTTPException(status_code=404, detail="Uploaded Book was not found.") from None
 
+    @app.post("/books/{book_id}/chapter-detection")
+    def detect_book_chapters(book_id: int) -> dict[str, object]:
+        try:
+            return store.detect_chapters_for_book(book_id)
+        except UploadedBookNotFoundError:
+            raise HTTPException(status_code=404, detail="Uploaded Book was not found.") from None
+
+    @app.get("/books/{book_id}/chapters")
+    def list_book_chapters(book_id: int) -> dict[str, list[dict[str, object]]]:
+        try:
+            return {"chapters": store.list_chapters_for_book(book_id)}
+        except UploadedBookNotFoundError:
+            raise HTTPException(status_code=404, detail="Uploaded Book was not found.") from None
+
     return app
 
 

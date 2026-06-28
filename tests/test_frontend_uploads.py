@@ -1,6 +1,7 @@
 import httpx
 
 from smartread_frontend.uploads import (
+    detect_chapters_from_api,
     extract_pdf_text_from_api,
     get_uploaded_books,
     upload_pdf_to_api,
@@ -192,3 +193,54 @@ def test_extract_pdf_text_from_api_reports_retryable_failure():
     assert result.message == "Text extraction failed. Retry extraction or upload a cleaner PDF."
     assert result.retryable is True
     assert result.book == failed_book
+
+
+def test_detect_chapters_from_api_reports_book_map_summary():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert str(request.url) == "http://api.test/books/7/chapter-detection"
+        return httpx.Response(
+            200,
+            json={
+                "book": {
+                    "id": 7,
+                    "original_filename": "learning.pdf",
+                    "content_type": "application/pdf",
+                    "file_size": 100,
+                    "uploaded_at": "2026-06-27T12:00:00Z",
+                    "upload_status": "uploaded",
+                    "processing_status": "extracted",
+                    "error_message": None,
+                    "chapter_detection_status": "detected",
+                    "chapter_detection_confidence": "high",
+                    "chapter_detection_message": None,
+                },
+                "summary": {
+                    "chapter_count": 2,
+                    "confidence": "high",
+                    "warning": None,
+                },
+                "chapters": [
+                    {
+                        "book_id": 7,
+                        "chapter_number": 1,
+                        "title": "Getting Started",
+                        "start_page": 1,
+                        "end_page": 3,
+                        "start_source_location": "book:7:page:1",
+                        "end_source_location": "book:7:page:3",
+                        "confidence": "high",
+                        "detection_source": "heading_pattern",
+                    }
+                ],
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = detect_chapters_from_api("http://api.test", book_id=7, client=client)
+
+    assert result.success is True
+    assert result.message == "Detected 2 chapters with high confidence."
+    assert result.summary["chapter_count"] == 2
+    assert result.chapters[0]["title"] == "Getting Started"
