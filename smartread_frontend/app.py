@@ -4,13 +4,17 @@ import streamlit as st
 
 try:
     from smartread_frontend.health import get_api_status
-    from smartread_frontend.uploads import get_uploaded_books, upload_pdf_to_api
+    from smartread_frontend.uploads import (
+        extract_pdf_text_from_api,
+        get_uploaded_books,
+        upload_pdf_to_api,
+    )
 except ModuleNotFoundError as error:
     if error.name != "smartread_frontend":
         raise
 
     from health import get_api_status
-    from uploads import get_uploaded_books, upload_pdf_to_api
+    from uploads import extract_pdf_text_from_api, get_uploaded_books, upload_pdf_to_api
 
 
 PRIVATE_UPLOAD_NOTICE = (
@@ -72,10 +76,30 @@ def main() -> None:
         else:
             for book in books_result.books:
                 st.markdown(
-                    f"- **{book['original_filename']}** · "
-                    f"{book['upload_status']} · "
+                    f"- **{book['original_filename']}** - "
+                    f"{book['upload_status']} - "
+                    f"{book['processing_status']} - "
                     f"{book['file_size']} bytes"
                 )
+                if st.button("Extract text", key=f"extract_{book['id']}"):
+                    with st.spinner("Extracting page text..."):
+                        extraction_result = extract_pdf_text_from_api(
+                            api_url,
+                            book_id=book["id"],
+                        )
+                    if extraction_result.success:
+                        st.success(extraction_result.message)
+                        st.markdown(extraction_result.message)
+                        if extraction_result.book is not None:
+                            st.markdown(
+                                f"Extraction status: {extraction_result.book['processing_status']}"
+                            )
+                    else:
+                        st.error(extraction_result.message)
+                        st.markdown(extraction_result.message)
+                        if extraction_result.retryable:
+                            st.markdown("Retry extraction or upload a cleaner PDF.")
+                    books_result = get_uploaded_books(api_url)
 
     with center:
         st.markdown("## Chapter Lesson")

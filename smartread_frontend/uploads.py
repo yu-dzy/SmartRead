@@ -19,6 +19,16 @@ class BookListResult:
     message: str = ""
 
 
+@dataclass(frozen=True)
+class ExtractionResult:
+    success: bool
+    message: str
+    summary: dict[str, int]
+    book: dict[str, Any] | None = None
+    pages: list[dict[str, Any]] | None = None
+    retryable: bool = False
+
+
 def get_uploaded_books(
     api_base_url: str,
     *,
@@ -34,6 +44,53 @@ def get_uploaded_books(
             success=False,
             books=[],
             message="Uploaded books could not be loaded. Refresh after FastAPI is available.",
+        )
+
+
+def extract_pdf_text_from_api(
+    api_base_url: str,
+    *,
+    book_id: int,
+    client: httpx.Client | None = None,
+) -> ExtractionResult:
+    http_client = client or httpx.Client(timeout=20.0)
+    try:
+        response = http_client.post(f"{api_base_url.rstrip('/')}/books/{book_id}/extraction")
+        if response.status_code == 200:
+            payload = response.json()
+            summary = payload["summary"]
+            return ExtractionResult(
+                success=True,
+                message=_format_extraction_summary(summary),
+                summary=summary,
+                book=payload["book"],
+                pages=payload["pages"],
+            )
+
+        detail = response.json().get("detail", {})
+        if isinstance(detail, dict):
+            return ExtractionResult(
+                success=False,
+                message=detail.get("message", "Extraction failed. Retry with this PDF."),
+                summary={},
+                book=detail.get("book"),
+                retryable=bool(detail.get("retryable", True)),
+            )
+        if isinstance(detail, str):
+            return ExtractionResult(success=False, message=detail, summary={}, retryable=True)
+
+        return ExtractionResult(
+            success=False,
+            message="Extraction failed. Retry with this PDF.",
+            summary={},
+            retryable=True,
+        )
+    except httpx.HTTPError:
+        return ExtractionResult(
+            success=False,
+            message="Extraction failed. Check the FastAPI backend, then try again.",
+            summary={},
+            retryable=True,
         )
 
 
@@ -81,3 +138,12 @@ def upload_pdf_to_api(
             message="Upload failed. Check the FastAPI backend, then try again.",
             retryable=True,
         )
+
+
+def _format_extraction_summary(summary: dict[str, int]) -> str:
+    return (
+        "Extraction complete: "
+        f"{summary['page_count']} pages, "
+        f"{summary['text_page_count']} with text, "
+        f"{summary['blank_page_count']} blank."
+    )

@@ -3,7 +3,11 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 
-from smartread_api.uploaded_books import UploadedBookStore
+from smartread_api.uploaded_books import (
+    PdfExtractionError,
+    UploadedBookNotFoundError,
+    UploadedBookStore,
+)
 
 PDF_READ_ERROR_MESSAGE = "The PDF could not be read. Upload a valid PDF and try again."
 
@@ -56,6 +60,29 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
     @app.get("/books")
     def list_books() -> dict[str, list[dict[str, object]]]:
         return {"books": store.list_uploaded_books()}
+
+    @app.post("/books/{book_id}/extraction")
+    def extract_book_pages(book_id: int) -> dict[str, object]:
+        try:
+            return store.extract_pages_for_book(book_id)
+        except UploadedBookNotFoundError:
+            raise HTTPException(status_code=404, detail="Uploaded Book was not found.") from None
+        except PdfExtractionError as error:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": error.message,
+                    "retryable": True,
+                    "book": error.book,
+                },
+            ) from None
+
+    @app.get("/books/{book_id}/pages")
+    def list_book_pages(book_id: int) -> dict[str, list[dict[str, object]]]:
+        try:
+            return {"pages": store.list_pages_for_book(book_id)}
+        except UploadedBookNotFoundError:
+            raise HTTPException(status_code=404, detail="Uploaded Book was not found.") from None
 
     return app
 
