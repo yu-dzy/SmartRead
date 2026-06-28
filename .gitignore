@@ -9,7 +9,6 @@ __pycache__/
 # Secrets
 .env
 .streamlit/secrets.toml
-# SmartRead local runtime data
-.smartread/
+
 # SmartRead local runtime data
 .smartread/

@@ -12,6 +12,7 @@ from smartread_frontend.uploads import (
     ChapterSummaryResult,
     CitationEvidenceResult,
     ConceptsTakeawaysResult,
+    DeleteBookResult,
     ExtractionResult,
     MissedConceptsResult,
     QuizAnswerResult,
@@ -265,6 +266,77 @@ def test_streamlit_uploads_pdf_and_shows_uploaded_book(monkeypatch):
     assert "deep-work.pdf is ready in SmartRead." in page_text
     assert "deep-work.pdf" in page_text
     assert "uploaded" in page_text
+
+
+def test_streamlit_deletes_uploaded_book_and_shows_private_data_notice(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 42,
+            "original_filename": "delete-me.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-27T12:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "not_started",
+            "error_message": None,
+            "chapter_detection_status": "not_started",
+            "chapter_detection_confidence": None,
+            "chapter_detection_message": None,
+            "chapter_review_status": "not_started",
+        }
+    ]
+    deleted: dict[str, int] = {}
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_delete_uploaded_book_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> DeleteBookResult:
+        deleted["book_id"] = book_id
+        uploaded_books.clear()
+        return DeleteBookResult(
+            success=True,
+            message="Uploaded Book and related learning data were deleted.",
+            book_id=book_id,
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "delete_uploaded_book_from_api",
+        fake_delete_uploaded_book_from_api,
+    )
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+    assert "Deleting removes the private upload and generated learning data." in page_text
+
+    delete_button = next(button for button in app.button if button.label == "Delete uploaded book")
+    delete_button.click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert deleted == {"book_id": 42}
+    assert "Uploaded Book and related learning data were deleted." in page_text
+    assert "No uploaded books yet." in page_text
 
 
 def test_streamlit_extracts_uploaded_pdf_and_shows_summary(monkeypatch):

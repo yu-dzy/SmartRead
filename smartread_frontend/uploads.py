@@ -20,6 +20,14 @@ class BookListResult:
 
 
 @dataclass(frozen=True)
+class DeleteBookResult:
+    success: bool
+    message: str
+    book_id: int | None = None
+    retryable: bool = False
+
+
+@dataclass(frozen=True)
 class ExtractionResult:
     success: bool
     message: str
@@ -179,6 +187,39 @@ def get_uploaded_books(
             success=False,
             books=[],
             message="Uploaded books could not be loaded. Refresh after FastAPI is available.",
+        )
+
+
+def delete_uploaded_book_from_api(
+    api_base_url: str,
+    *,
+    book_id: int,
+    client: httpx.Client | None = None,
+) -> DeleteBookResult:
+    http_client = client or httpx.Client(timeout=10.0)
+    try:
+        response = http_client.delete(f"{api_base_url.rstrip('/')}/books/{book_id}")
+        if response.status_code == 200:
+            payload = response.json()
+            return DeleteBookResult(
+                success=True,
+                message=payload["message"],
+                book_id=payload["book_id"],
+            )
+
+        detail = response.json().get("detail", {})
+        return DeleteBookResult(
+            success=False,
+            message=detail if isinstance(detail, str) else "Delete failed. Try again.",
+            book_id=book_id,
+            retryable=response.status_code != 404,
+        )
+    except httpx.HTTPError:
+        return DeleteBookResult(
+            success=False,
+            message="Delete failed. Check FastAPI, then try again.",
+            book_id=book_id,
+            retryable=True,
         )
 
 

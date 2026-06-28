@@ -1,9 +1,11 @@
 import os
+import re
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse
 
 from smartread_api.chapter_concepts import OpenAIConceptsTakeawaysGenerator
 from smartread_api.chapter_quizzes import OpenAIChapterQuizGenerator
@@ -24,6 +26,7 @@ from smartread_api.uploaded_books import (
 )
 
 PDF_READ_ERROR_MESSAGE = "The PDF could not be read. Upload a valid PDF and try again."
+BOOK_PATH_PATTERN = re.compile(r"^/books/(?P<book_id>\d+)(?:/|$)")
 
 
 def create_app(
@@ -41,6 +44,26 @@ def create_app(
     )
     chapter_quiz_generator = quiz_generator or OpenAIChapterQuizGenerator.from_env()
 
+    @app.middleware("http")
+    async def require_owner_for_book_routes(request: Request, call_next: object):
+        match = BOOK_PATH_PATTERN.match(request.url.path)
+        if match is not None:
+            book_id = int(match.group("book_id"))
+            if not store.uploaded_book_exists(book_id):
+                return await call_next(request)
+            try:
+                store.assert_uploaded_book_owner(
+                    book_id,
+                    _owner_id_from_request(request),
+                )
+            except UploadedBookNotFoundError:
+                return JSONResponse(
+                    status_code=404,
+                    content={"detail": "Uploaded Book was not found."},
+                )
+
+        return await call_next(request)
+
     @app.get("/health")
     def health() -> dict[str, str]:
         return {
@@ -50,7 +73,8 @@ def create_app(
         }
 
     @app.post("/books/uploads", status_code=201)
-    async def upload_book(file: UploadFile = File(...)) -> dict[str, object]:
+    async def upload_book(request: Request, file: UploadFile = File(...)) -> dict[str, object]:
+        owner_id = _owner_id_from_request(request)
         filename = file.filename or ""
         content_type = file.content_type or "application/octet-stream"
         if not filename.lower().endswith(".pdf") or content_type != "application/pdf":
@@ -62,6 +86,7 @@ def create_app(
         content = await file.read()
         if not _looks_like_readable_pdf(content):
             book = store.save_failed_pdf(
+                owner_id=owner_id,
                 original_filename=filename,
                 content_type=content_type,
                 content=content,
@@ -77,14 +102,22 @@ def create_app(
             )
 
         return store.save_uploaded_pdf(
+            owner_id=owner_id,
             original_filename=filename,
             content_type=content_type,
             content=content,
         )
 
     @app.get("/books")
-    def list_books() -> dict[str, list[dict[str, object]]]:
-        return {"books": store.list_uploaded_books()}
+    def list_books(request: Request) -> dict[str, list[dict[str, object]]]:
+        return {"books": store.list_uploaded_books(_owner_id_from_request(request))}
+
+    @app.delete("/books/{book_id}")
+    def delete_book(book_id: int) -> dict[str, object]:
+        try:
+            return store.delete_uploaded_book(book_id)
+        except UploadedBookNotFoundError:
+            raise HTTPException(status_code=404, detail="Uploaded Book was not found.") from None
 
     @app.post("/books/{book_id}/extraction")
     def extract_book_pages(book_id: int) -> dict[str, object]:
@@ -468,6 +501,11 @@ def _default_database_path() -> Path:
 
 def _looks_like_readable_pdf(content: bytes) -> bool:
     return content.startswith(b"%PDF-") and b"%%EOF" in content[-1024:]
+
+
+def _owner_id_from_request(request: Request) -> str:
+    owner_id = request.headers.get("X-SmartRead-Owner", "local-user").strip()
+    return owner_id or "local-user"
 
 
 app = create_app()
