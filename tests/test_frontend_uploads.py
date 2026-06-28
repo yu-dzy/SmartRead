@@ -10,6 +10,7 @@ from smartread_frontend.uploads import (
     get_chapter_summary_from_api,
     get_citation_evidence_from_api,
     get_concepts_takeaways_from_api,
+    get_missed_concepts_from_api,
     get_quiz_progress_from_api,
     get_quiz_from_api,
     get_uploaded_books,
@@ -854,6 +855,71 @@ def test_get_quiz_progress_from_api_loads_saved_answers():
     assert result.progress["answered_count"] == 1
     assert result.answers[0]["question_id"] == "q1"
     assert result.answers[0]["is_correct"] is True
+
+
+def test_get_missed_concepts_from_api_loads_saved_review_items():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert (
+            str(request.url)
+            == "http://api.test/books/7/chapter-boundaries/1/missed-concepts"
+        )
+        return httpx.Response(
+            200,
+            json={
+                "book_id": 7,
+                "chapter_number": 1,
+                "summary": {"missed_concept_count": 1},
+                "missed_concepts": [
+                    {
+                        "book_id": 7,
+                        "chapter_number": 1,
+                        "concept_name": "Protected Attention",
+                        "question_id": "q1",
+                        "quiz_answer_id": 3,
+                        "explanation": "Protected attention reduces constant switching.",
+                        "citation_id": "qc1",
+                        "source_location": "book:7:page:1",
+                        "page_number": 1,
+                        "source_excerpt": "Protected attention reduces constant switching.",
+                    }
+                ],
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = get_missed_concepts_from_api(
+        "http://api.test",
+        book_id=7,
+        chapter_number=1,
+        client=client,
+    )
+
+    assert result.success is True
+    assert result.summary == {"missed_concept_count": 1}
+    assert result.missed_concepts[0]["concept_name"] == "Protected Attention"
+    assert result.missed_concepts[0]["source_excerpt"] == (
+        "Protected attention reduces constant switching."
+    )
+
+
+def test_get_missed_concepts_from_api_reports_recoverable_loading_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("backend down", request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = get_missed_concepts_from_api(
+        "http://api.test",
+        book_id=7,
+        chapter_number=1,
+        client=client,
+    )
+
+    assert result.success is False
+    assert result.retryable is True
+    assert result.message == "Missed Concepts could not be loaded. Check FastAPI, then try again."
 
 
 def _quiz_payload() -> dict[str, object]:

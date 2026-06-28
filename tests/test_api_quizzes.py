@@ -227,6 +227,155 @@ def test_submit_incorrect_quiz_answer_shows_correct_answer_and_evidence(tmp_path
     }
 
 
+def test_incorrect_quiz_answer_creates_missed_concept(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    client = TestClient(
+        create_app(
+            database_path=tmp_path / "smartread.db",
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+
+    answer_response = client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Long-term memory"},
+    )
+    response = client.get(f"/books/{book_id}/chapter-boundaries/1/missed-concepts")
+
+    assert answer_response.status_code == 200
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"] == {"missed_concept_count": 1}
+    assert payload["missed_concepts"] == [
+        {
+            "book_id": book_id,
+            "chapter_number": 1,
+            "concept_name": "Protected Attention",
+            "question_id": "q1",
+            "quiz_answer_id": 1,
+            "explanation": (
+                "Protected attention reduces constant switching so deliberate practice is "
+                "easier to repeat."
+            ),
+            "citation_id": "qc1",
+            "source_location": f"book:{book_id}:page:1",
+            "page_number": 1,
+            "source_excerpt": (
+                "Deep focus protects attention from constant switching so learners can "
+                "practice deliberately."
+            ),
+        }
+    ]
+
+
+def test_correct_quiz_answer_does_not_create_missed_concept(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    client = TestClient(
+        create_app(
+            database_path=tmp_path / "smartread.db",
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Constant switching"},
+    )
+    response = client.get(f"/books/{book_id}/chapter-boundaries/1/missed-concepts")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "book_id": book_id,
+        "chapter_number": 1,
+        "summary": {"missed_concept_count": 0},
+        "missed_concepts": [],
+    }
+
+
+def test_duplicate_missed_concepts_for_same_core_concept_are_avoided(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    client = TestClient(
+        create_app(
+            database_path=tmp_path / "smartread.db",
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Long-term memory"},
+    )
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q3",
+        json={"selected_answer": "Retrieval Cues"},
+    )
+    response = client.get(f"/books/{book_id}/chapter-boundaries/1/missed-concepts")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"] == {"missed_concept_count": 1}
+    assert [concept["concept_name"] for concept in payload["missed_concepts"]] == [
+        "Protected Attention"
+    ]
+
+
+def test_missed_concepts_reload_after_restart(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    database_path = tmp_path / "smartread.db"
+    client = TestClient(
+        create_app(
+            database_path=database_path,
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Long-term memory"},
+    )
+
+    reloaded_client = TestClient(
+        create_app(
+            database_path=database_path,
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+        )
+    )
+    response = reloaded_client.get(f"/books/{book_id}/chapter-boundaries/1/missed-concepts")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"] == {"missed_concept_count": 1}
+    assert payload["missed_concepts"][0]["concept_name"] == "Protected Attention"
+    assert payload["missed_concepts"][0]["question_id"] == "q1"
+
+
+def test_list_missed_concepts_rejects_invalid_chapter_record(tmp_path):
+    client = TestClient(
+        create_app(
+            database_path=tmp_path / "smartread.db",
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=FakeQuizGenerator(_valid_quiz_output()),
+        )
+    )
+
+    response = client.get("/books/999/chapter-boundaries/1/missed-concepts")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Accepted chapter boundary was not found."
+
+
 def test_quiz_progress_reloads_after_restart_without_duplicate_answer_records(tmp_path):
     quiz_generator = FakeQuizGenerator(_valid_quiz_output())
     database_path = tmp_path / "smartread.db"
