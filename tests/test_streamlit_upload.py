@@ -5,8 +5,10 @@ from streamlit.testing.v1 import AppTest
 from smartread_frontend.health import ApiStatus
 from smartread_frontend.uploads import (
     BookListResult,
+    ChapterBoundaryListResult,
     ChapterBoundaryReviewResult,
     ChapterDetectionResult,
+    ChapterSummaryResult,
     ExtractionResult,
     UploadResult,
 )
@@ -517,3 +519,341 @@ def test_streamlit_saves_reviewed_chapter_boundaries(monkeypatch):
     ]
     assert "Accepted 1 reviewed chapter boundary." in page_text
     assert "Accepted chapter boundaries are saved for downstream lesson generation." in page_text
+
+
+def test_streamlit_generates_selected_chapter_summary(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 13,
+            "original_filename": "summary.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 13,
+            "chapter_number": 1,
+            "title": "Deep Focus",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:13:page:1",
+            "end_source_location": "book:13:page:2",
+            "review_status": "accepted",
+        }
+    ]
+    generated: dict[str, object] = {}
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    def fake_generate_chapter_summary_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> ChapterSummaryResult:
+        generated["book_id"] = book_id
+        generated["chapter_number"] = chapter_number
+        return ChapterSummaryResult(
+            success=True,
+            message="Summary generated for Chapter 1: Deep Focus.",
+            chapter=accepted_chapters[0],
+            generation_status="generated",
+            summary={
+                "central_argument": {
+                    "claim": "Focus improves when attention is protected.",
+                    "citation_ids": ["c1"],
+                },
+                "supporting_ideas": [
+                    {
+                        "claim": "Protected attention makes deep work possible.",
+                        "citation_ids": ["c1"],
+                    }
+                ],
+                "citations": [
+                    {
+                        "id": "c1",
+                        "source_location": "book:13:page:1",
+                        "page_number": 1,
+                        "source_excerpt": "Focus improves when attention is protected.",
+                    }
+                ],
+            },
+        )
+
+    def fake_get_chapter_summary_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> ChapterSummaryResult:
+        return ChapterSummaryResult(
+            success=False,
+            message="Chapter Summary has not been generated yet.",
+            retryable=False,
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "generate_chapter_summary_from_api",
+        fake_generate_chapter_summary_from_api,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_summary_from_api",
+        fake_get_chapter_summary_from_api,
+    )
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    generate_button = next(
+        button for button in app.button if button.label == "Generate summary: 1. Deep Focus"
+    )
+    generate_button.click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert generated == {"book_id": 13, "chapter_number": 1}
+    assert "Summary generated for Chapter 1: Deep Focus." in page_text
+    assert "Focus improves when attention is protected." in page_text
+    assert "Protected attention makes deep work possible." in page_text
+
+
+def test_streamlit_shows_retryable_summary_generation_failure(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 14,
+            "original_filename": "unsupported-summary.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 14,
+            "chapter_number": 1,
+            "title": "Evidence",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:14:page:1",
+            "end_source_location": "book:14:page:2",
+            "review_status": "accepted",
+        }
+    ]
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    def fake_generate_chapter_summary_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> ChapterSummaryResult:
+        return ChapterSummaryResult(
+            success=False,
+            message="Source excerpts must support cited claims.",
+            chapter=accepted_chapters[0],
+            generation_status="failed",
+            retryable=True,
+        )
+
+    def fake_get_chapter_summary_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> ChapterSummaryResult:
+        return ChapterSummaryResult(
+            success=False,
+            message="Chapter Summary has not been generated yet.",
+            retryable=False,
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "generate_chapter_summary_from_api",
+        fake_generate_chapter_summary_from_api,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_summary_from_api",
+        fake_get_chapter_summary_from_api,
+    )
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    generate_button = next(
+        button for button in app.button if button.label == "Generate summary: 1. Evidence"
+    )
+    generate_button.click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert "Source excerpts must support cited claims." in page_text
+    assert "Retry summary generation for this chapter." in page_text
+
+
+def test_streamlit_loads_persisted_chapter_summary(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 15,
+            "original_filename": "persisted-summary.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 15,
+            "chapter_number": 1,
+            "title": "Persisted Focus",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:15:page:1",
+            "end_source_location": "book:15:page:2",
+            "review_status": "accepted",
+        }
+    ]
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    def fake_get_chapter_summary_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> ChapterSummaryResult:
+        return ChapterSummaryResult(
+            success=True,
+            message="Summary loaded for Chapter 1: Persisted Focus.",
+            chapter=accepted_chapters[0],
+            generation_status="generated",
+            summary={
+                "central_argument": {
+                    "claim": "Persisted summaries should be visible after restart.",
+                    "citation_ids": ["c1"],
+                },
+                "supporting_ideas": [],
+                "citations": [],
+            },
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_summary_from_api",
+        fake_get_chapter_summary_from_api,
+    )
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert "Summary loaded for Chapter 1: Persisted Focus." in page_text
+    assert "Persisted summaries should be visible after restart." in page_text

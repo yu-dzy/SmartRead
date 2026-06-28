@@ -48,6 +48,24 @@ class ChapterBoundaryReviewResult:
     retryable: bool = False
 
 
+@dataclass(frozen=True)
+class ChapterBoundaryListResult:
+    success: bool
+    chapters: list[dict[str, Any]]
+    message: str = ""
+    retryable: bool = False
+
+
+@dataclass(frozen=True)
+class ChapterSummaryResult:
+    success: bool
+    message: str
+    summary: dict[str, Any] | None = None
+    chapter: dict[str, Any] | None = None
+    generation_status: str | None = None
+    retryable: bool = False
+
+
 def get_uploaded_books(
     api_base_url: str,
     *,
@@ -200,6 +218,124 @@ def save_chapter_boundaries_to_api(
         )
 
 
+def get_chapter_boundaries_from_api(
+    api_base_url: str,
+    *,
+    book_id: int,
+    client: httpx.Client | None = None,
+) -> ChapterBoundaryListResult:
+    http_client = client or httpx.Client(timeout=10.0)
+    try:
+        response = http_client.get(f"{api_base_url.rstrip('/')}/books/{book_id}/chapter-boundaries")
+        if response.status_code == 200:
+            return ChapterBoundaryListResult(
+                success=True,
+                chapters=response.json()["chapters"],
+            )
+
+        detail = response.json().get("detail", {})
+        return ChapterBoundaryListResult(
+            success=False,
+            chapters=[],
+            message=detail if isinstance(detail, str) else "Accepted chapters could not be loaded.",
+            retryable=True,
+        )
+    except httpx.HTTPError:
+        return ChapterBoundaryListResult(
+            success=False,
+            chapters=[],
+            message="Accepted chapters could not be loaded. Check FastAPI, then try again.",
+            retryable=True,
+        )
+
+
+def generate_chapter_summary_from_api(
+    api_base_url: str,
+    *,
+    book_id: int,
+    chapter_number: int,
+    client: httpx.Client | None = None,
+) -> ChapterSummaryResult:
+    http_client = client or httpx.Client(timeout=60.0)
+    try:
+        response = http_client.post(
+            f"{api_base_url.rstrip('/')}/books/{book_id}/chapter-boundaries/{chapter_number}/summary"
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            chapter = payload["chapter"]
+            return ChapterSummaryResult(
+                success=True,
+                message=_format_summary_generation_message(chapter),
+                summary=payload["summary"],
+                chapter=chapter,
+                generation_status=payload["generation_status"],
+            )
+
+        detail = response.json().get("detail", {})
+        if isinstance(detail, dict):
+            failed_summary = detail.get("summary") or {}
+            return ChapterSummaryResult(
+                success=False,
+                message=detail.get("message", "Summary generation failed. Retry this chapter."),
+                summary=failed_summary.get("summary"),
+                chapter=failed_summary.get("chapter"),
+                generation_status=failed_summary.get("generation_status"),
+                retryable=bool(detail.get("retryable", True)),
+            )
+        if isinstance(detail, str):
+            return ChapterSummaryResult(success=False, message=detail, retryable=True)
+
+        return ChapterSummaryResult(
+            success=False,
+            message="Summary generation failed. Retry this chapter.",
+            retryable=True,
+        )
+    except httpx.HTTPError:
+        return ChapterSummaryResult(
+            success=False,
+            message="Summary generation failed. Check the FastAPI backend, then try again.",
+            retryable=True,
+        )
+
+
+def get_chapter_summary_from_api(
+    api_base_url: str,
+    *,
+    book_id: int,
+    chapter_number: int,
+    client: httpx.Client | None = None,
+) -> ChapterSummaryResult:
+    http_client = client or httpx.Client(timeout=10.0)
+    try:
+        response = http_client.get(
+            f"{api_base_url.rstrip('/')}/books/{book_id}/chapter-boundaries/{chapter_number}/summary"
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            chapter = payload["chapter"]
+            return ChapterSummaryResult(
+                success=True,
+                message=_format_summary_loaded_message(chapter),
+                summary=payload["summary"],
+                chapter=chapter,
+                generation_status=payload["generation_status"],
+            )
+
+        detail = response.json().get("detail", {})
+        return ChapterSummaryResult(
+            success=False,
+            message=detail if isinstance(detail, str) else "Summary could not be loaded.",
+            retryable=response.status_code != 404,
+        )
+    except httpx.HTTPError:
+        return ChapterSummaryResult(
+            success=False,
+            message="Summary could not be loaded. Check the FastAPI backend, then try again.",
+            retryable=True,
+        )
+
+
 def upload_pdf_to_api(
     api_base_url: str,
     *,
@@ -267,3 +403,11 @@ def _format_chapter_detection_summary(summary: dict[str, Any]) -> str:
 def _format_boundary_review_summary(chapter_count: int) -> str:
     noun = "boundary" if chapter_count == 1 else "boundaries"
     return f"Accepted {chapter_count} reviewed chapter {noun}."
+
+
+def _format_summary_generation_message(chapter: dict[str, Any]) -> str:
+    return f"Summary generated for Chapter {chapter['chapter_number']}: {chapter['title']}."
+
+
+def _format_summary_loaded_message(chapter: dict[str, Any]) -> str:
+    return f"Summary loaded for Chapter {chapter['chapter_number']}: {chapter['title']}."

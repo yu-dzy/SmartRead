@@ -2,7 +2,7 @@
 
 SmartRead is a private learning system for cited chapter lessons, active recall, and targeted review.
 
-## Issue #5 Chapter Boundary Review Slice
+## Issue #6 Cited Chapter Summary Slice
 
 Start the FastAPI backend:
 
@@ -29,7 +29,21 @@ After extraction, use **Detect chapters**. FastAPI detects provisional chapters 
 
 After detection, review the Book Map in Streamlit. You can rename chapters, adjust start/end pages, merge the first two adjacent sections, split the first section when it spans more than one page, and save accepted boundaries. FastAPI validates ranges, rejects overlaps, persists accepted chapter boundaries, and exposes accepted source pages for downstream lesson generation.
 
-Chapter lesson generation, summaries, AI features, and quizzes are not implemented yet.
+After boundaries are accepted, use the Summary tab to generate one cited Summary for one selected chapter. FastAPI sends only the accepted chapter pages to the configured generator, validates structured output, rejects citations outside the accepted chapter, rejects invented source excerpts, persists the generated Summary and generation status, and shows retryable failures in Streamlit.
+
+Real summary generation uses OpenAI by default with model `gpt-5.5`. Set the API key before starting FastAPI:
+
+```powershell
+$env:OPENAI_API_KEY = "your-api-key"
+```
+
+To override the default model:
+
+```powershell
+$env:SMARTREAD_OPENAI_MODEL = "gpt-5.5"
+```
+
+Core Concepts, Key Takeaways, clickable Evidence-panel behavior, quizzes, missed concepts, and review queues are not implemented yet.
 
 By default, metadata is saved at `.smartread/smartread.db`. To use another database file:
 
