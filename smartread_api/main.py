@@ -1,4 +1,6 @@
 import os
+from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -16,6 +18,7 @@ from smartread_api.uploaded_books import (
     PdfExtractionError,
     QuizAnswerValidationError,
     QuizQuestionNotFoundError,
+    ReviewItemNotFoundError,
     UploadedBookNotFoundError,
     UploadedBookStore,
 )
@@ -28,9 +31,10 @@ def create_app(
     summary_generator: object | None = None,
     concepts_generator: object | None = None,
     quiz_generator: object | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="SmartRead API")
-    store = UploadedBookStore(database_path or _default_database_path())
+    store = UploadedBookStore(database_path or _default_database_path(), clock=clock)
     chapter_summary_generator = summary_generator or OpenAIChapterSummaryGenerator.from_env()
     concepts_takeaways_generator = (
         concepts_generator or OpenAIConceptsTakeawaysGenerator.from_env()
@@ -364,6 +368,56 @@ def create_app(
                 status_code=404,
                 detail="Accepted chapter boundary was not found.",
             ) from None
+
+    @app.get("/books/{book_id}/chapter-boundaries/{chapter_number}/review-items")
+    def list_review_items(book_id: int, chapter_number: int) -> dict[str, object]:
+        try:
+            return store.list_review_items(book_id, chapter_number)
+        except AcceptedChapterNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="Accepted chapter boundary was not found.",
+            ) from None
+
+    @app.post("/books/{book_id}/chapter-boundaries/{chapter_number}/review-items/{review_item_id}/answer")
+    def submit_review_item_answer(
+        book_id: int,
+        chapter_number: int,
+        review_item_id: int,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        try:
+            selected_answer = payload.get("selected_answer")
+            if not isinstance(selected_answer, str):
+                raise QuizAnswerValidationError("Choose an answer before checking this review.")
+            return store.submit_review_item_answer(
+                book_id,
+                chapter_number,
+                review_item_id,
+                selected_answer,
+            )
+        except AcceptedChapterNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="Accepted chapter boundary was not found.",
+            ) from None
+        except ChapterQuizNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="Quiz has not been generated yet.",
+            ) from None
+        except QuizQuestionNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="Quiz question was not found.",
+            ) from None
+        except ReviewItemNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="Review Item was not found.",
+            ) from None
+        except QuizAnswerValidationError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from None
 
     @app.post("/books/{book_id}/chapter-boundaries/{chapter_number}/missed-concepts/{question_id}/retry")
     def retry_missed_question(
