@@ -4,9 +4,11 @@ from smartread_frontend.uploads import (
     detect_chapters_from_api,
     extract_pdf_text_from_api,
     generate_chapter_summary_from_api,
+    generate_concepts_takeaways_from_api,
     get_chapter_boundaries_from_api,
     get_chapter_summary_from_api,
     get_citation_evidence_from_api,
+    get_concepts_takeaways_from_api,
     get_uploaded_books,
     save_chapter_boundaries_to_api,
     upload_pdf_to_api,
@@ -550,3 +552,130 @@ def test_get_citation_evidence_from_api_reports_retryable_loading_error():
     assert result.success is False
     assert result.retryable is True
     assert result.message == "Evidence could not be loaded. Check the FastAPI backend, then try again."
+
+
+def test_generate_concepts_takeaways_from_api_reports_persisted_content():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert str(request.url) == "http://api.test/books/7/chapter-boundaries/1/concepts-takeaways"
+        return httpx.Response(
+            200,
+            json={
+                "book_id": 7,
+                "chapter_number": 1,
+                "chapter": {
+                    "book_id": 7,
+                    "chapter_number": 1,
+                    "title": "Deep Focus",
+                    "start_page": 1,
+                    "end_page": 2,
+                    "start_source_location": "book:7:page:1",
+                    "end_source_location": "book:7:page:2",
+                    "review_status": "accepted",
+                },
+                "generation_status": "generated",
+                "generation_error": None,
+                "provider": "openai",
+                "model": "gpt-5.5",
+                "generated_at": "2026-06-28T07:00:00Z",
+                "content": {
+                    "core_concepts": [
+                        {
+                            "name": "Protected Attention",
+                            "explanation": "Protected attention reduces switching.",
+                            "why_it_matters": "It keeps deliberate practice on track.",
+                            "example": None,
+                            "citation_ids": ["c1"],
+                        }
+                    ],
+                    "key_takeaways": [
+                        {
+                            "text": "Protect attention before difficult practice.",
+                            "citation_ids": ["c1"],
+                        }
+                    ],
+                    "citations": [
+                        {
+                            "id": "c1",
+                            "source_location": "book:7:page:1",
+                            "page_number": 1,
+                            "source_excerpt": "Protected attention reduces switching.",
+                        }
+                    ],
+                },
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = generate_concepts_takeaways_from_api(
+        "http://api.test",
+        book_id=7,
+        chapter_number=1,
+        client=client,
+    )
+
+    assert result.success is True
+    assert result.message == "Core Concepts and Key Takeaways generated for Chapter 1: Deep Focus."
+    assert result.content is not None
+    assert result.content["core_concepts"][0]["name"] == "Protected Attention"
+
+
+def test_get_concepts_takeaways_from_api_loads_persisted_content():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert str(request.url) == "http://api.test/books/7/chapter-boundaries/1/concepts-takeaways"
+        return httpx.Response(
+            200,
+            json={
+                "book_id": 7,
+                "chapter_number": 1,
+                "chapter": {
+                    "book_id": 7,
+                    "chapter_number": 1,
+                    "title": "Deep Focus",
+                    "start_page": 1,
+                    "end_page": 2,
+                    "start_source_location": "book:7:page:1",
+                    "end_source_location": "book:7:page:2",
+                    "review_status": "accepted",
+                },
+                "generation_status": "generated",
+                "generation_error": None,
+                "provider": "openai",
+                "model": "gpt-5.5",
+                "generated_at": "2026-06-28T07:00:00Z",
+                "content": {
+                    "core_concepts": [
+                        {
+                            "name": "Protected Attention",
+                            "explanation": "Protected attention reduces switching.",
+                            "why_it_matters": "It keeps deliberate practice on track.",
+                            "example": None,
+                            "citation_ids": ["c1"],
+                        }
+                    ],
+                    "key_takeaways": [
+                        {
+                            "text": "Protect attention before difficult practice.",
+                            "citation_ids": ["c1"],
+                        }
+                    ],
+                    "citations": [],
+                },
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = get_concepts_takeaways_from_api(
+        "http://api.test",
+        book_id=7,
+        chapter_number=1,
+        client=client,
+    )
+
+    assert result.success is True
+    assert result.message == "Core Concepts and Key Takeaways loaded for Chapter 1: Deep Focus."
+    assert result.content is not None
+    assert result.content["key_takeaways"][0]["text"] == "Protect attention before difficult practice."

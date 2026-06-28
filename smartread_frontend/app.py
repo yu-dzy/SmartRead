@@ -8,9 +8,11 @@ try:
         detect_chapters_from_api,
         extract_pdf_text_from_api,
         generate_chapter_summary_from_api,
+        generate_concepts_takeaways_from_api,
         get_chapter_boundaries_from_api,
         get_chapter_summary_from_api,
         get_citation_evidence_from_api,
+        get_concepts_takeaways_from_api,
         get_uploaded_books,
         save_chapter_boundaries_to_api,
         upload_pdf_to_api,
@@ -24,9 +26,11 @@ except ModuleNotFoundError as error:
         detect_chapters_from_api,
         extract_pdf_text_from_api,
         generate_chapter_summary_from_api,
+        generate_concepts_takeaways_from_api,
         get_chapter_boundaries_from_api,
         get_chapter_summary_from_api,
         get_citation_evidence_from_api,
+        get_concepts_takeaways_from_api,
         get_uploaded_books,
         save_chapter_boundaries_to_api,
         upload_pdf_to_api,
@@ -155,9 +159,9 @@ def main() -> None:
         with summary_tab:
             _render_summary_tab(api_url=api_url, books_result=books_result)
         with concepts_tab:
-            st.markdown("Core Concepts will be generated in a later MVP slice.")
+            _render_core_concepts_tab(api_url=api_url, books_result=books_result)
         with takeaways_tab:
-            st.markdown("Key Takeaways will be generated in a later MVP slice.")
+            _render_key_takeaways_tab(api_url=api_url, books_result=books_result)
         with quiz_tab:
             st.markdown("Five quiz questions will be generated in a later MVP slice.")
         with review_tab:
@@ -266,7 +270,10 @@ def _render_summary_tab(*, api_url: str, books_result: object | None) -> None:
     for book, chapters in accepted_chapters_by_book:
         for chapter in chapters:
             chapter_number = int(chapter["chapter_number"])
-            st.markdown(f"**{book['original_filename']} - Chapter {chapter_number}: {chapter['title']}**")
+            st.markdown(
+                f"**{book['original_filename']} - "
+                f"Chapter {chapter_number}: {chapter['title']}**"
+            )
             result_key = f"summary_result_{book['id']}_{chapter_number}"
             if result_key not in st.session_state:
                 loaded_result = get_chapter_summary_from_api(
@@ -296,6 +303,154 @@ def _render_summary_tab(*, api_url: str, books_result: object | None) -> None:
                     book_id=int(book["id"]),
                     chapter_number=chapter_number,
                 )
+
+
+def _render_core_concepts_tab(*, api_url: str, books_result: object | None) -> None:
+    accepted_chapters_by_book = _load_accepted_chapters_for_summary(
+        api_url=api_url,
+        books_result=books_result,
+    )
+    if not accepted_chapters_by_book:
+        st.markdown("No generated Core Concepts yet.")
+        return
+
+    for book, chapters in accepted_chapters_by_book:
+        for chapter in chapters:
+            chapter_number = int(chapter["chapter_number"])
+            st.markdown(
+                f"**{book['original_filename']} - "
+                f"Chapter {chapter_number}: {chapter['title']}**"
+            )
+            result = _load_concepts_takeaways_result(
+                api_url=api_url,
+                book_id=int(book["id"]),
+                chapter_number=chapter_number,
+            )
+
+            if st.button(
+                f"Generate concepts and takeaways: {chapter_number}. {chapter['title']}",
+                key=f"generate_concepts_takeaways_{book['id']}_{chapter_number}",
+            ):
+                with st.spinner("Generating Core Concepts and Key Takeaways..."):
+                    result = generate_concepts_takeaways_from_api(
+                        api_url,
+                        book_id=int(book["id"]),
+                        chapter_number=chapter_number,
+                    )
+                st.session_state[
+                    f"concepts_takeaways_result_{book['id']}_{chapter_number}"
+                ] = result
+
+            if result is not None:
+                _render_core_concepts_result(
+                    result,
+                    api_url=api_url,
+                    book_id=int(book["id"]),
+                    chapter_number=chapter_number,
+                )
+
+
+def _render_key_takeaways_tab(*, api_url: str, books_result: object | None) -> None:
+    accepted_chapters_by_book = _load_accepted_chapters_for_summary(
+        api_url=api_url,
+        books_result=books_result,
+    )
+    if not accepted_chapters_by_book:
+        st.markdown("No generated Key Takeaways yet.")
+        return
+
+    for book, chapters in accepted_chapters_by_book:
+        for chapter in chapters:
+            chapter_number = int(chapter["chapter_number"])
+            result = _load_concepts_takeaways_result(
+                api_url=api_url,
+                book_id=int(book["id"]),
+                chapter_number=chapter_number,
+            )
+            if result is None:
+                st.markdown("Generate Core Concepts and Key Takeaways to see takeaways.")
+            else:
+                _render_key_takeaways_result(
+                    result,
+                    api_url=api_url,
+                    book_id=int(book["id"]),
+                    chapter_number=chapter_number,
+                )
+
+
+def _load_concepts_takeaways_result(
+    *,
+    api_url: str,
+    book_id: int,
+    chapter_number: int,
+) -> object | None:
+    result_key = f"concepts_takeaways_result_{book_id}_{chapter_number}"
+    if result_key not in st.session_state:
+        loaded_result = get_concepts_takeaways_from_api(
+            api_url,
+            book_id=book_id,
+            chapter_number=chapter_number,
+        )
+        if loaded_result.success:
+            st.session_state[result_key] = loaded_result
+
+    return st.session_state.get(result_key)
+
+
+def _render_core_concepts_result(
+    result: object,
+    *,
+    api_url: str,
+    book_id: int,
+    chapter_number: int,
+) -> None:
+    if not result.success:
+        st.error(result.message)
+        st.markdown(result.message)
+        if result.retryable:
+            st.markdown("Retry Core Concepts and Key Takeaways generation for this chapter.")
+        return
+
+    st.success(result.message)
+    st.markdown(result.message)
+    for index, concept in enumerate((result.content or {}).get("core_concepts", []), start=1):
+        st.markdown(f"**{concept['name']}**")
+        st.markdown(concept["explanation"])
+        st.markdown(concept["why_it_matters"])
+        if concept.get("example"):
+            st.markdown(concept["example"])
+        _render_citation_controls(
+            api_url=api_url,
+            book_id=book_id,
+            chapter_number=chapter_number,
+            citation_ids=concept["citation_ids"],
+            key_prefix=f"concept_{index}",
+        )
+
+
+def _render_key_takeaways_result(
+    result: object,
+    *,
+    api_url: str,
+    book_id: int,
+    chapter_number: int,
+) -> None:
+    if not result.success:
+        st.error(result.message)
+        st.markdown(result.message)
+        if result.retryable:
+            st.markdown("Retry Core Concepts and Key Takeaways generation for this chapter.")
+        return
+
+    for index, takeaway in enumerate((result.content or {}).get("key_takeaways", []), start=1):
+        st.markdown(f"- {takeaway['text']}")
+        _render_citation_controls(
+            api_url=api_url,
+            book_id=book_id,
+            chapter_number=chapter_number,
+            citation_ids=takeaway["citation_ids"],
+            key_prefix=f"takeaway_{index}",
+        )
 
 
 def _load_accepted_chapters_for_summary(

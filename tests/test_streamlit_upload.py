@@ -10,6 +10,7 @@ from smartread_frontend.uploads import (
     ChapterDetectionResult,
     ChapterSummaryResult,
     CitationEvidenceResult,
+    ConceptsTakeawaysResult,
     ExtractionResult,
     UploadResult,
 )
@@ -492,6 +493,30 @@ def test_streamlit_saves_reviewed_chapter_boundaries(monkeypatch):
             book=uploaded_books[0],
         )
 
+    def fake_get_chapter_summary_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> ChapterSummaryResult:
+        return ChapterSummaryResult(
+            success=False,
+            message="Chapter Summary has not been generated yet.",
+            retryable=False,
+        )
+
+    def fake_get_concepts_takeaways_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> ConceptsTakeawaysResult:
+        return ConceptsTakeawaysResult(
+            success=False,
+            message="Core Concepts and Key Takeaways have not been generated yet.",
+            retryable=False,
+        )
+
     monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
     monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
     monkeypatch.setattr(uploads_module, "detect_chapters_from_api", fake_detect_chapters_from_api)
@@ -499,6 +524,16 @@ def test_streamlit_saves_reviewed_chapter_boundaries(monkeypatch):
         uploads_module,
         "save_chapter_boundaries_to_api",
         fake_save_chapter_boundaries_to_api,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_summary_from_api",
+        fake_get_chapter_summary_from_api,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "get_concepts_takeaways_from_api",
+        fake_get_concepts_takeaways_from_api,
     )
 
     app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
@@ -1135,3 +1170,275 @@ def test_streamlit_evidence_error_can_retry_same_citation(monkeypatch):
     page_text = "\n".join(element.value for element in app.markdown)
     assert "Retry loads the same focused excerpt." in page_text
     assert "Verified evidence" in page_text
+
+
+def test_streamlit_generates_core_concepts_and_key_takeaways(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 18,
+            "original_filename": "concept-tabs.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 18,
+            "chapter_number": 1,
+            "title": "Learning Hooks",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:18:page:1",
+            "end_source_location": "book:18:page:2",
+            "review_status": "accepted",
+        }
+    ]
+    generated: dict[str, object] = {}
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    def fake_get_concepts_takeaways_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> ConceptsTakeawaysResult:
+        return ConceptsTakeawaysResult(
+            success=False,
+            message="Core Concepts and Key Takeaways have not been generated yet.",
+            retryable=False,
+        )
+
+    def fake_generate_concepts_takeaways_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> ConceptsTakeawaysResult:
+        generated["book_id"] = book_id
+        generated["chapter_number"] = chapter_number
+        return ConceptsTakeawaysResult(
+            success=True,
+            message="Core Concepts and Key Takeaways generated for Chapter 1: Learning Hooks.",
+            chapter=accepted_chapters[0],
+            generation_status="generated",
+            content={
+                "core_concepts": [
+                    {
+                        "name": "Protected Attention",
+                        "explanation": "Protected attention reduces switching.",
+                        "why_it_matters": "It keeps deliberate practice on track.",
+                        "example": "A learner silences chat before reading.",
+                        "citation_ids": ["c1"],
+                    }
+                ],
+                "key_takeaways": [
+                    {
+                        "text": "Protect attention before difficult practice.",
+                        "citation_ids": ["c1"],
+                    }
+                ],
+                "citations": [
+                    {
+                        "id": "c1",
+                        "source_location": "book:18:page:1",
+                        "page_number": 1,
+                        "source_excerpt": "Protected attention reduces switching.",
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "get_concepts_takeaways_from_api",
+        fake_get_concepts_takeaways_from_api,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "generate_concepts_takeaways_from_api",
+        fake_generate_concepts_takeaways_from_api,
+    )
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    generate_button = next(
+        button
+        for button in app.button
+        if button.label == "Generate concepts and takeaways: 1. Learning Hooks"
+    )
+    generate_button.click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert generated == {"book_id": 18, "chapter_number": 1}
+    assert "Core Concepts and Key Takeaways generated for Chapter 1: Learning Hooks." in page_text
+    assert "Protected Attention" in page_text
+    assert "Protected attention reduces switching." in page_text
+    assert "It keeps deliberate practice on track." in page_text
+    assert "Protect attention before difficult practice." in page_text
+
+
+def test_streamlit_shows_retryable_concepts_takeaways_failure(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 19,
+            "original_filename": "unsupported-concepts.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 19,
+            "chapter_number": 1,
+            "title": "Unsupported Claims",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:19:page:1",
+            "end_source_location": "book:19:page:2",
+            "review_status": "accepted",
+        }
+    ]
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    def fake_get_chapter_summary_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> ChapterSummaryResult:
+        return ChapterSummaryResult(
+            success=False,
+            message="Chapter Summary has not been generated yet.",
+            retryable=False,
+        )
+
+    def fake_get_concepts_takeaways_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> ConceptsTakeawaysResult:
+        return ConceptsTakeawaysResult(
+            success=False,
+            message="Core Concepts and Key Takeaways have not been generated yet.",
+            retryable=False,
+        )
+
+    def fake_generate_concepts_takeaways_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> ConceptsTakeawaysResult:
+        return ConceptsTakeawaysResult(
+            success=False,
+            message="Source excerpts must support concept and takeaway claims.",
+            chapter=accepted_chapters[0],
+            generation_status="failed",
+            retryable=True,
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_summary_from_api",
+        fake_get_chapter_summary_from_api,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "get_concepts_takeaways_from_api",
+        fake_get_concepts_takeaways_from_api,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "generate_concepts_takeaways_from_api",
+        fake_generate_concepts_takeaways_from_api,
+    )
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    generate_button = next(
+        button
+        for button in app.button
+        if button.label == "Generate concepts and takeaways: 1. Unsupported Claims"
+    )
+    generate_button.click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert "Source excerpts must support concept and takeaway claims." in page_text
+    assert "Retry Core Concepts and Key Takeaways generation for this chapter." in page_text

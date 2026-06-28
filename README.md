@@ -2,7 +2,7 @@
 
 SmartRead is a private learning system for cited chapter lessons, active recall, and targeted review.
 
-## Issue #7 Clickable Citation Evidence Slice
+## Issue #8 Core Concepts And Key Takeaways Slice
 
 Start the FastAPI backend:
 
@@ -33,7 +33,9 @@ After boundaries are accepted, use the Summary tab to generate one cited Summary
 
 Persisted Summary citations render as clickable controls. Clicking a citation asks FastAPI to resolve that persisted citation ID, then updates the Study Console Evidence panel with the verified source location, page number, and focused source excerpt. Missing, stale, or invalid citations show an unverified evidence state instead of exposing full page text or crashing. Retryable evidence loading errors provide a retry action for the same citation.
 
-Real summary generation uses OpenAI by default with model `gpt-5.5`. Set the API key before starting FastAPI:
+Use the Core Concepts tab to generate cited Core Concepts and grounded Key Takeaways for the same accepted chapter pages. FastAPI validates the structured Pydantic output, rejects invalid citations, duplicate or generic concepts, unsupported claims, and malformed model responses, then persists generation status, content, citations, and errors. Persisted Concepts and Takeaways reload after restart and their citation controls update the same focused Evidence panel.
+
+Real Summary, Core Concepts, and Key Takeaways generation use OpenAI by default with model `gpt-5.5`. Set the API key before starting FastAPI:
 
 ```powershell
 $env:OPENAI_API_KEY = "your-api-key"
@@ -45,7 +47,7 @@ To override the default model:
 $env:SMARTREAD_OPENAI_MODEL = "gpt-5.5"
 ```
 
-Core Concepts, Key Takeaways, quizzes, missed concepts, and review queues are not implemented yet.
+Quizzes, missed concepts, and review queues are not implemented yet.
 
 By default, metadata is saved at `.smartread/smartread.db`. To use another database file:
 
