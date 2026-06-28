@@ -11,6 +11,12 @@ from typing import Any
 
 from pypdf import PdfReader
 
+from smartread_api.chapter_concepts import (
+    ConceptsTakeawaysGenerationError,
+    ConceptsTakeawaysGenerator,
+    ConceptsTakeawaysValidationError,
+    validate_concepts_takeaways_output,
+)
 from smartread_api.chapter_summaries import (
     ChapterSummaryGenerationError,
     ChapterSummaryGenerator,
@@ -39,6 +45,10 @@ class AcceptedChapterNotFoundError(Exception):
 
 
 class ChapterSummaryNotFoundError(Exception):
+    pass
+
+
+class ConceptsTakeawaysNotFoundError(Exception):
     pass
 
 
@@ -548,51 +558,36 @@ class UploadedBookStore:
         chapter_number: int,
         citation_id: str,
     ) -> dict[str, Any]:
-        summary_record = self.get_chapter_summary(book_id, chapter_number)
         current_source = self.get_accepted_chapter_source_pages(book_id, chapter_number)
         current_pages_by_location = {
             page["source_location"]: page for page in current_source["pages"]
         }
-        summary = summary_record["summary"] or {}
-        for citation in summary.get("citations", []):
-            if citation.get("id") == citation_id:
-                source_location = citation["source_location"]
-                page_number = citation["page_number"]
-                current_page = current_pages_by_location.get(source_location)
-                if current_page is None or current_page["page_number"] != page_number:
-                    return self._build_unverified_citation_evidence(
-                        book_id=book_id,
-                        chapter_number=chapter_number,
-                        citation_id=citation_id,
-                        message=(
-                            f"Citation {citation_id} no longer points inside "
-                            "the accepted chapter boundary."
-                        ),
-                        source_location=source_location,
-                        page_number=page_number,
-                    )
+        generated_content = []
+        try:
+            summary_record = self.get_chapter_summary(book_id, chapter_number)
+            generated_content.append(summary_record["summary"] or {})
+        except ChapterSummaryNotFoundError:
+            pass
 
-                source_excerpt = citation.get("source_excerpt")
-                if not source_excerpt:
-                    return self._build_unverified_citation_evidence(
-                        book_id=book_id,
-                        chapter_number=chapter_number,
-                        citation_id=citation_id,
-                        message=f"Citation {citation_id} is missing a source excerpt.",
-                        source_location=source_location,
-                        page_number=page_number,
-                    )
+        try:
+            concepts_record = self.get_chapter_concepts_takeaways(book_id, chapter_number)
+            generated_content.append(concepts_record["content"] or {})
+        except ConceptsTakeawaysNotFoundError:
+            pass
 
-                return {
-                    "book_id": book_id,
-                    "chapter_number": chapter_number,
-                    "citation_id": citation_id,
-                    "verification_status": "verified",
-                    "message": f"Citation {citation_id} is verified.",
-                    "source_location": source_location,
-                    "page_number": page_number,
-                    "source_excerpt": source_excerpt,
-                }
+        if not generated_content:
+            raise ChapterSummaryNotFoundError
+
+        for content in generated_content:
+            evidence = self._resolve_citation_evidence_from_content(
+                content=content,
+                book_id=book_id,
+                chapter_number=chapter_number,
+                citation_id=citation_id,
+                current_pages_by_location=current_pages_by_location,
+            )
+            if evidence is not None:
+                return evidence
 
         return self._build_unverified_citation_evidence(
             book_id=book_id,
@@ -600,6 +595,108 @@ class UploadedBookStore:
             citation_id=citation_id,
             message=f"Citation {citation_id} could not be verified.",
         )
+
+    def generate_chapter_concepts_takeaways(
+        self,
+        book_id: int,
+        chapter_number: int,
+        generator: ConceptsTakeawaysGenerator,
+    ) -> dict[str, Any]:
+        source = self.get_accepted_chapter_source_pages(book_id, chapter_number)
+        chapter = source["chapter"]
+        pages = source["pages"]
+
+        try:
+            generated_output = generator.generate_concepts_takeaways(
+                chapter=chapter,
+                pages=pages,
+            )
+            content = validate_concepts_takeaways_output(generated_output, pages=pages)
+        except ConceptsTakeawaysGenerationError as error:
+            return self._save_failed_concepts_takeaways(
+                book_id=book_id,
+                chapter_number=chapter_number,
+                chapter=chapter,
+                provider=getattr(generator, "provider", "unknown"),
+                model=getattr(generator, "model", "unknown"),
+                error_message=error.message,
+            )
+        except ConceptsTakeawaysValidationError as error:
+            return self._save_failed_concepts_takeaways(
+                book_id=book_id,
+                chapter_number=chapter_number,
+                chapter=chapter,
+                provider=getattr(generator, "provider", "unknown"),
+                model=getattr(generator, "model", "unknown"),
+                error_message=error.message,
+            )
+
+        generated_at = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO chapter_concepts_takeaways (
+                    book_id,
+                    chapter_number,
+                    generation_status,
+                    generation_error,
+                    provider,
+                    model,
+                    generated_at,
+                    content_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(book_id, chapter_number)
+                DO UPDATE SET
+                    generation_status = excluded.generation_status,
+                    generation_error = excluded.generation_error,
+                    provider = excluded.provider,
+                    model = excluded.model,
+                    generated_at = excluded.generated_at,
+                    content_json = excluded.content_json
+                """,
+                (
+                    book_id,
+                    chapter_number,
+                    "generated",
+                    None,
+                    getattr(generator, "provider", "unknown"),
+                    getattr(generator, "model", "unknown"),
+                    generated_at,
+                    json.dumps(content),
+                ),
+            )
+
+        return self.get_chapter_concepts_takeaways(book_id, chapter_number)
+
+    def get_chapter_concepts_takeaways(
+        self,
+        book_id: int,
+        chapter_number: int,
+    ) -> dict[str, Any]:
+        source = self.get_accepted_chapter_source_pages(book_id, chapter_number)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    book_id,
+                    chapter_number,
+                    generation_status,
+                    generation_error,
+                    provider,
+                    model,
+                    generated_at,
+                    content_json
+                FROM chapter_concepts_takeaways
+                WHERE book_id = ? AND chapter_number = ?
+                """,
+                (book_id, chapter_number),
+            ).fetchone()
+
+        if row is None:
+            raise ConceptsTakeawaysNotFoundError
+
+        return self._to_chapter_concepts_takeaways(row, source["chapter"])
 
     def _save_pdf_metadata(
         self,
@@ -778,6 +875,23 @@ class UploadedBookStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chapter_concepts_takeaways (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    book_id INTEGER NOT NULL,
+                    chapter_number INTEGER NOT NULL,
+                    generation_status TEXT NOT NULL,
+                    generation_error TEXT,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    generated_at TEXT,
+                    content_json TEXT,
+                    UNIQUE(book_id, chapter_number),
+                    FOREIGN KEY(book_id) REFERENCES uploaded_books(id)
+                )
+                """
+            )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)
@@ -871,6 +985,24 @@ class UploadedBookStore:
             "summary": json.loads(summary_json) if summary_json else None,
         }
 
+    def _to_chapter_concepts_takeaways(
+        self,
+        row: sqlite3.Row,
+        chapter: dict[str, Any],
+    ) -> dict[str, Any]:
+        content_json = row["content_json"]
+        return {
+            "book_id": row["book_id"],
+            "chapter_number": row["chapter_number"],
+            "chapter": chapter,
+            "generation_status": row["generation_status"],
+            "generation_error": row["generation_error"],
+            "provider": row["provider"],
+            "model": row["model"],
+            "generated_at": row["generated_at"],
+            "content": json.loads(content_json) if content_json else None,
+        }
+
     def _save_failed_chapter_summary(
         self,
         *,
@@ -927,6 +1059,116 @@ class UploadedBookStore:
             "generated_at": None,
             "summary": None,
         }
+
+    def _save_failed_concepts_takeaways(
+        self,
+        *,
+        book_id: int,
+        chapter_number: int,
+        chapter: dict[str, Any],
+        provider: str,
+        model: str,
+        error_message: str,
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO chapter_concepts_takeaways (
+                    book_id,
+                    chapter_number,
+                    generation_status,
+                    generation_error,
+                    provider,
+                    model,
+                    generated_at,
+                    content_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(book_id, chapter_number)
+                DO UPDATE SET
+                    generation_status = excluded.generation_status,
+                    generation_error = excluded.generation_error,
+                    provider = excluded.provider,
+                    model = excluded.model,
+                    generated_at = excluded.generated_at,
+                    content_json = excluded.content_json
+                """,
+                (
+                    book_id,
+                    chapter_number,
+                    "failed",
+                    error_message,
+                    provider,
+                    model,
+                    None,
+                    None,
+                ),
+            )
+
+        return {
+            "book_id": book_id,
+            "chapter_number": chapter_number,
+            "chapter": chapter,
+            "generation_status": "failed",
+            "generation_error": error_message,
+            "provider": provider,
+            "model": model,
+            "generated_at": None,
+            "content": None,
+        }
+
+    def _resolve_citation_evidence_from_content(
+        self,
+        *,
+        content: dict[str, Any],
+        book_id: int,
+        chapter_number: int,
+        citation_id: str,
+        current_pages_by_location: dict[str, dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        for citation in content.get("citations", []):
+            if citation.get("id") != citation_id:
+                continue
+
+            source_location = citation["source_location"]
+            page_number = citation["page_number"]
+            current_page = current_pages_by_location.get(source_location)
+            if current_page is None or current_page["page_number"] != page_number:
+                return self._build_unverified_citation_evidence(
+                    book_id=book_id,
+                    chapter_number=chapter_number,
+                    citation_id=citation_id,
+                    message=(
+                        f"Citation {citation_id} no longer points inside "
+                        "the accepted chapter boundary."
+                    ),
+                    source_location=source_location,
+                    page_number=page_number,
+                )
+
+            source_excerpt = citation.get("source_excerpt")
+            if not source_excerpt:
+                return self._build_unverified_citation_evidence(
+                    book_id=book_id,
+                    chapter_number=chapter_number,
+                    citation_id=citation_id,
+                    message=f"Citation {citation_id} is missing a source excerpt.",
+                    source_location=source_location,
+                    page_number=page_number,
+                )
+
+            return {
+                "book_id": book_id,
+                "chapter_number": chapter_number,
+                "citation_id": citation_id,
+                "verification_status": "verified",
+                "message": f"Citation {citation_id} is verified.",
+                "source_location": source_location,
+                "page_number": page_number,
+                "source_excerpt": source_excerpt,
+            }
+
+        return None
 
     def _build_unverified_citation_evidence(
         self,

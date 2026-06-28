@@ -67,6 +67,16 @@ class ChapterSummaryResult:
 
 
 @dataclass(frozen=True)
+class ConceptsTakeawaysResult:
+    success: bool
+    message: str
+    content: dict[str, Any] | None = None
+    chapter: dict[str, Any] | None = None
+    generation_status: str | None = None
+    retryable: bool = False
+
+
+@dataclass(frozen=True)
 class CitationEvidenceResult:
     success: bool
     message: str
@@ -348,6 +358,104 @@ def get_chapter_summary_from_api(
         )
 
 
+def generate_concepts_takeaways_from_api(
+    api_base_url: str,
+    *,
+    book_id: int,
+    chapter_number: int,
+    client: httpx.Client | None = None,
+) -> ConceptsTakeawaysResult:
+    http_client = client or httpx.Client(timeout=60.0)
+    try:
+        response = http_client.post(
+            f"{api_base_url.rstrip('/')}/books/{book_id}/chapter-boundaries/"
+            f"{chapter_number}/concepts-takeaways"
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            chapter = payload["chapter"]
+            return ConceptsTakeawaysResult(
+                success=True,
+                message=_format_concepts_generation_message(chapter),
+                content=payload["content"],
+                chapter=chapter,
+                generation_status=payload["generation_status"],
+            )
+
+        detail = response.json().get("detail", {})
+        if isinstance(detail, dict):
+            failed = detail.get("concepts_takeaways") or {}
+            return ConceptsTakeawaysResult(
+                success=False,
+                message=detail.get(
+                    "message",
+                    "Core Concepts and Key Takeaways generation failed. Retry this chapter.",
+                ),
+                content=failed.get("content"),
+                chapter=failed.get("chapter"),
+                generation_status=failed.get("generation_status"),
+                retryable=bool(detail.get("retryable", True)),
+            )
+        if isinstance(detail, str):
+            return ConceptsTakeawaysResult(success=False, message=detail, retryable=True)
+
+        return ConceptsTakeawaysResult(
+            success=False,
+            message="Core Concepts and Key Takeaways generation failed. Retry this chapter.",
+            retryable=True,
+        )
+    except httpx.HTTPError:
+        return ConceptsTakeawaysResult(
+            success=False,
+            message=(
+                "Core Concepts and Key Takeaways generation failed. "
+                "Check the FastAPI backend, then try again."
+            ),
+            retryable=True,
+        )
+
+
+def get_concepts_takeaways_from_api(
+    api_base_url: str,
+    *,
+    book_id: int,
+    chapter_number: int,
+    client: httpx.Client | None = None,
+) -> ConceptsTakeawaysResult:
+    http_client = client or httpx.Client(timeout=10.0)
+    try:
+        response = http_client.get(
+            f"{api_base_url.rstrip('/')}/books/{book_id}/chapter-boundaries/"
+            f"{chapter_number}/concepts-takeaways"
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            chapter = payload["chapter"]
+            return ConceptsTakeawaysResult(
+                success=True,
+                message=_format_concepts_loaded_message(chapter),
+                content=payload["content"],
+                chapter=chapter,
+                generation_status=payload["generation_status"],
+            )
+
+        detail = response.json().get("detail", {})
+        return ConceptsTakeawaysResult(
+            success=False,
+            message=detail if isinstance(detail, str) else "Concepts and takeaways could not be loaded.",
+            retryable=response.status_code != 404,
+        )
+    except httpx.HTTPError:
+        return ConceptsTakeawaysResult(
+            success=False,
+            message=(
+                "Concepts and takeaways could not be loaded. "
+                "Check the FastAPI backend, then try again."
+            ),
+            retryable=True,
+        )
+
+
 def get_citation_evidence_from_api(
     api_base_url: str,
     *,
@@ -465,3 +573,17 @@ def _format_summary_generation_message(chapter: dict[str, Any]) -> str:
 
 def _format_summary_loaded_message(chapter: dict[str, Any]) -> str:
     return f"Summary loaded for Chapter {chapter['chapter_number']}: {chapter['title']}."
+
+
+def _format_concepts_generation_message(chapter: dict[str, Any]) -> str:
+    return (
+        "Core Concepts and Key Takeaways generated for "
+        f"Chapter {chapter['chapter_number']}: {chapter['title']}."
+    )
+
+
+def _format_concepts_loaded_message(chapter: dict[str, Any]) -> str:
+    return (
+        "Core Concepts and Key Takeaways loaded for "
+        f"Chapter {chapter['chapter_number']}: {chapter['title']}."
+    )
