@@ -124,6 +124,35 @@ class MissedConceptsResult:
 
 
 @dataclass(frozen=True)
+class ReviewItemsResult:
+    success: bool
+    message: str
+    summary: dict[str, int]
+    review_items: list[dict[str, Any]]
+    upcoming_review_items: list[dict[str, Any]]
+    retryable: bool = False
+
+
+@dataclass(frozen=True)
+class ReviewAnswerResult:
+    success: bool
+    message: str
+    review_item_id: int
+    selected_answer: str | None = None
+    is_correct: bool | None = None
+    correct_answer: str | None = None
+    explanation: str | None = None
+    tested_concept: str | None = None
+    citation_id: str | None = None
+    source_location: str | None = None
+    page_number: int | None = None
+    source_excerpt: str | None = None
+    review_result_status: str | None = None
+    review_item: dict[str, Any] | None = None
+    retryable: bool = False
+
+
+@dataclass(frozen=True)
 class CitationEvidenceResult:
     success: bool
     message: str
@@ -722,6 +751,101 @@ def get_missed_concepts_from_api(
         )
 
 
+def get_review_items_from_api(
+    api_base_url: str,
+    *,
+    book_id: int,
+    chapter_number: int,
+    client: httpx.Client | None = None,
+) -> ReviewItemsResult:
+    http_client = client or httpx.Client(timeout=10.0)
+    try:
+        response = http_client.get(
+            f"{api_base_url.rstrip('/')}/books/{book_id}/chapter-boundaries/"
+            f"{chapter_number}/review-items"
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            return ReviewItemsResult(
+                success=True,
+                message="Review queue loaded.",
+                summary=payload["summary"],
+                review_items=payload["review_items"],
+                upcoming_review_items=payload["upcoming_review_items"],
+            )
+
+        detail = response.json().get("detail", {})
+        return ReviewItemsResult(
+            success=False,
+            message=detail if isinstance(detail, str) else "Review queue could not be loaded.",
+            summary={},
+            review_items=[],
+            upcoming_review_items=[],
+            retryable=response.status_code != 404,
+        )
+    except httpx.HTTPError:
+        return ReviewItemsResult(
+            success=False,
+            message="Review queue could not be loaded. Check FastAPI, then try again.",
+            summary={},
+            review_items=[],
+            upcoming_review_items=[],
+            retryable=True,
+        )
+
+
+def submit_review_item_answer_to_api(
+    api_base_url: str,
+    *,
+    book_id: int,
+    chapter_number: int,
+    review_item_id: int,
+    selected_answer: str,
+    client: httpx.Client | None = None,
+) -> ReviewAnswerResult:
+    http_client = client or httpx.Client(timeout=10.0)
+    try:
+        response = http_client.post(
+            f"{api_base_url.rstrip('/')}/books/{book_id}/chapter-boundaries/"
+            f"{chapter_number}/review-items/{review_item_id}/answer",
+            json={"selected_answer": selected_answer},
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            review_item = payload["review_item"]
+            return ReviewAnswerResult(
+                success=True,
+                message=_format_review_answer_message(payload),
+                review_item_id=review_item["id"],
+                selected_answer=payload["selected_answer"],
+                is_correct=payload["is_correct"],
+                correct_answer=payload["correct_answer"],
+                explanation=payload["explanation"],
+                tested_concept=payload["tested_concept"],
+                citation_id=payload["citation_id"],
+                source_location=payload["source_location"],
+                page_number=payload["page_number"],
+                source_excerpt=payload["source_excerpt"],
+                review_result_status=payload["review_result_status"],
+                review_item=review_item,
+            )
+
+        detail = response.json().get("detail", {})
+        return ReviewAnswerResult(
+            success=False,
+            message=detail if isinstance(detail, str) else "Review feedback failed. Try again.",
+            review_item_id=review_item_id,
+            retryable=response.status_code != 404,
+        )
+    except httpx.HTTPError:
+        return ReviewAnswerResult(
+            success=False,
+            message="Review feedback failed. Check FastAPI, then try again.",
+            review_item_id=review_item_id,
+            retryable=True,
+        )
+
+
 def retry_missed_question_to_api(
     api_base_url: str,
     *,
@@ -916,3 +1040,11 @@ def _format_quiz_loaded_message(chapter: dict[str, Any]) -> str:
 
 def _format_quiz_answer_feedback_message(payload: dict[str, Any]) -> str:
     return "Correct." if payload["is_correct"] else "Incorrect."
+
+
+def _format_review_answer_message(payload: dict[str, Any]) -> str:
+    if payload["review_result_status"] == "completed":
+        return "Review completed."
+    if payload["review_result_status"] == "reset":
+        return "Review reset to the 1-day stage."
+    return "Review advanced."

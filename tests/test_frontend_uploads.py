@@ -13,9 +13,11 @@ from smartread_frontend.uploads import (
     get_missed_concepts_from_api,
     get_quiz_progress_from_api,
     get_quiz_from_api,
+    get_review_items_from_api,
     get_uploaded_books,
     retry_missed_question_to_api,
     save_chapter_boundaries_to_api,
+    submit_review_item_answer_to_api,
     submit_quiz_answer_to_api,
     upload_pdf_to_api,
 )
@@ -921,6 +923,173 @@ def test_get_missed_concepts_from_api_reports_recoverable_loading_error():
     assert result.success is False
     assert result.retryable is True
     assert result.message == "Missed Concepts could not be loaded. Check FastAPI, then try again."
+
+
+def test_get_review_items_from_api_loads_due_and_upcoming_reviews():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert (
+            str(request.url)
+            == "http://api.test/books/7/chapter-boundaries/1/review-items"
+        )
+        return httpx.Response(
+            200,
+            json={
+                "book_id": 7,
+                "chapter_number": 1,
+                "summary": {"due_review_count": 1, "active_review_count": 2},
+                "review_items": [
+                    {
+                        "id": 1,
+                        "missed_concept_id": 3,
+                        "book_id": 7,
+                        "chapter_number": 1,
+                        "concept_name": "Protected Attention",
+                        "question_id": "q1",
+                        "stage": "day_1",
+                        "due_on": "2026-06-29",
+                        "status": "active",
+                        "review_focus": "Protected attention reduces constant switching.",
+                        "citation_id": "qc1",
+                        "source_location": "book:7:page:1",
+                        "page_number": 1,
+                        "source_excerpt": "Protected attention reduces constant switching.",
+                    }
+                ],
+                "upcoming_review_items": [
+                    {
+                        "id": 2,
+                        "missed_concept_id": 4,
+                        "book_id": 7,
+                        "chapter_number": 1,
+                        "concept_name": "Retrieval Cues",
+                        "question_id": "q2",
+                        "stage": "day_3",
+                        "due_on": "2026-07-02",
+                        "status": "active",
+                        "review_focus": "Retrieval cues help recall.",
+                        "citation_id": "qc2",
+                        "source_location": "book:7:page:2",
+                        "page_number": 2,
+                        "source_excerpt": "Retrieval cues help recall.",
+                    }
+                ],
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = get_review_items_from_api(
+        "http://api.test",
+        book_id=7,
+        chapter_number=1,
+        client=client,
+    )
+
+    assert result.success is True
+    assert result.summary == {"due_review_count": 1, "active_review_count": 2}
+    assert result.review_items[0]["concept_name"] == "Protected Attention"
+    assert result.upcoming_review_items[0]["stage"] == "day_3"
+
+
+def test_get_review_items_from_api_reports_recoverable_loading_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("backend down", request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = get_review_items_from_api(
+        "http://api.test",
+        book_id=7,
+        chapter_number=1,
+        client=client,
+    )
+
+    assert result.success is False
+    assert result.retryable is True
+    assert result.message == "Review queue could not be loaded. Check FastAPI, then try again."
+
+
+def test_submit_review_item_answer_to_api_reports_advanced_feedback():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert (
+            str(request.url)
+            == "http://api.test/books/7/chapter-boundaries/1/review-items/3/answer"
+        )
+        assert request.read() == b'{"selected_answer":"Constant switching"}'
+        return httpx.Response(
+            200,
+            json={
+                "book_id": 7,
+                "chapter_number": 1,
+                "question_id": "q1",
+                "selected_answer": "Constant switching",
+                "is_correct": True,
+                "correct_answer": "Constant switching",
+                "explanation": "Protected attention reduces constant switching.",
+                "tested_concept": "Protected Attention",
+                "citation_id": "qc1",
+                "source_location": "book:7:page:1",
+                "page_number": 1,
+                "source_excerpt": "Protected attention reduces constant switching.",
+                "progress": {},
+                "review_result_status": "advanced",
+                "review_item": {
+                    "id": 3,
+                    "missed_concept_id": 9,
+                    "book_id": 7,
+                    "chapter_number": 1,
+                    "concept_name": "Protected Attention",
+                    "question_id": "q1",
+                    "stage": "day_3",
+                    "due_on": "2026-07-02",
+                    "status": "active",
+                    "review_focus": "Protected attention reduces constant switching.",
+                    "citation_id": "qc1",
+                    "source_location": "book:7:page:1",
+                    "page_number": 1,
+                    "source_excerpt": "Protected attention reduces constant switching.",
+                },
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = submit_review_item_answer_to_api(
+        "http://api.test",
+        book_id=7,
+        chapter_number=1,
+        review_item_id=3,
+        selected_answer="Constant switching",
+        client=client,
+    )
+
+    assert result.success is True
+    assert result.message == "Review advanced."
+    assert result.is_correct is True
+    assert result.review_result_status == "advanced"
+    assert result.review_item["stage"] == "day_3"
+
+
+def test_submit_review_item_answer_to_api_reports_recoverable_backend_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("backend down", request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = submit_review_item_answer_to_api(
+        "http://api.test",
+        book_id=7,
+        chapter_number=1,
+        review_item_id=3,
+        selected_answer="Constant switching",
+        client=client,
+    )
+
+    assert result.success is False
+    assert result.retryable is True
+    assert result.message == "Review feedback failed. Check FastAPI, then try again."
 
 
 def test_retry_missed_question_to_api_reports_resolved_feedback():

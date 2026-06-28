@@ -4,7 +4,8 @@ import hashlib
 import json
 import re
 import sqlite3
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -74,6 +75,10 @@ class MissedQuestionNotFoundError(Exception):
     pass
 
 
+class ReviewItemNotFoundError(Exception):
+    pass
+
+
 CHAPTER_HEADING_PATTERN = re.compile(
     r"^\s*(?:chapter|ch\.?)\s+(?P<label>[0-9ivxlcdm]+)\s*[:.\-]?\s*(?P<title>.+)?$",
     re.IGNORECASE,
@@ -84,8 +89,14 @@ WEAK_NUMBERED_HEADING_PATTERN = re.compile(
 
 
 class UploadedBookStore:
-    def __init__(self, database_path: str | Path) -> None:
+    def __init__(
+        self,
+        database_path: str | Path,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self.database_path = Path(database_path)
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
@@ -950,6 +961,71 @@ class UploadedBookStore:
             "missed_concepts": missed_concepts,
         }
 
+    def list_review_items(
+        self,
+        book_id: int,
+        chapter_number: int,
+    ) -> dict[str, Any]:
+        self.get_accepted_chapter_source_pages(book_id, chapter_number)
+        today = self._today_iso()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    review_items.id,
+                    review_items.missed_concept_id,
+                    review_items.book_id,
+                    review_items.chapter_number,
+                    review_items.concept_name,
+                    review_items.question_id,
+                    review_items.review_focus,
+                    review_items.citation_id,
+                    review_items.source_location,
+                    review_items.page_number,
+                    review_items.source_excerpt,
+                    review_items.stage,
+                    review_items.due_on,
+                    review_items.status,
+                    latest_result.selected_answer AS last_selected_answer,
+                    latest_result.is_correct AS last_is_correct,
+                    latest_result.previous_stage AS last_previous_stage,
+                    latest_result.next_stage AS last_next_stage,
+                    latest_result.result_status AS last_result_status,
+                    latest_result.reviewed_at AS last_reviewed_at
+                FROM review_items
+                LEFT JOIN (
+                    SELECT review_results.*
+                    FROM review_results
+                    INNER JOIN (
+                        SELECT review_item_id, MAX(id) AS last_result_id
+                        FROM review_results
+                        GROUP BY review_item_id
+                    ) latest
+                        ON review_results.id = latest.last_result_id
+                ) latest_result
+                    ON latest_result.review_item_id = review_items.id
+                WHERE review_items.book_id = ?
+                  AND review_items.chapter_number = ?
+                  AND review_items.status = 'active'
+                ORDER BY review_items.due_on, review_items.concept_name
+                """,
+                (book_id, chapter_number),
+            ).fetchall()
+
+        review_items = [self._to_review_item(row) for row in rows]
+        due_items = [item for item in review_items if item["due_on"] <= today]
+        upcoming_items = [item for item in review_items if item["due_on"] > today]
+        return {
+            "book_id": book_id,
+            "chapter_number": chapter_number,
+            "summary": {
+                "due_review_count": len(due_items),
+                "active_review_count": len(review_items),
+            },
+            "review_items": due_items,
+            "upcoming_review_items": upcoming_items,
+        }
+
     def retry_missed_question(
         self,
         book_id: int,
@@ -1049,6 +1125,98 @@ class UploadedBookStore:
             progress=self._build_quiz_progress(answer_rows, total_questions=len(quiz["questions"])),
         )
         return {**feedback, "missed_concept_status": missed_concept_status}
+
+    def submit_review_item_answer(
+        self,
+        book_id: int,
+        chapter_number: int,
+        review_item_id: int,
+        selected_answer: str,
+    ) -> dict[str, Any]:
+        selected_answer = selected_answer.strip()
+        if not selected_answer:
+            raise QuizAnswerValidationError("Choose an answer before checking this review.")
+
+        quiz_record = self.get_chapter_quiz(book_id, chapter_number)
+        quiz = quiz_record["quiz"] or {}
+
+        with self._connect() as connection:
+            review_item_row = self._fetch_review_item_row(
+                connection,
+                book_id,
+                chapter_number,
+                review_item_id,
+            )
+            if review_item_row is None:
+                raise ReviewItemNotFoundError
+
+            question = self._find_quiz_question(quiz, review_item_row["question_id"])
+            if question is None:
+                raise QuizQuestionNotFoundError
+            if selected_answer not in question["answer_options"]:
+                raise QuizAnswerValidationError("Choose one of the saved answer options.")
+
+            citation = self._find_quiz_citation(quiz, question["citation_id"])
+            is_correct = self._normalize_answer(selected_answer) == self._normalize_answer(
+                question["correct_answer"]
+            )
+            previous_stage = review_item_row["stage"]
+            next_stage, due_on, status, result_status = self._next_review_schedule(
+                previous_stage=previous_stage,
+                is_correct=is_correct,
+            )
+            reviewed_at = self._now().isoformat(timespec="seconds").replace("+00:00", "Z")
+            connection.execute(
+                """
+                UPDATE review_items
+                SET stage = ?,
+                    due_on = ?,
+                    status = ?,
+                    updated_at = ?,
+                    completed_at = ?
+                WHERE id = ?
+                """,
+                (
+                    next_stage,
+                    due_on,
+                    status,
+                    reviewed_at,
+                    reviewed_at if status == "completed" else None,
+                    review_item_id,
+                ),
+            )
+            self._save_review_result(
+                connection=connection,
+                review_item_id=review_item_id,
+                selected_answer=selected_answer,
+                is_correct=is_correct,
+                previous_stage=previous_stage,
+                next_stage=next_stage,
+                result_status=result_status,
+                reviewed_at=reviewed_at,
+            )
+            updated_review_item = self._fetch_review_item_row(
+                connection,
+                book_id,
+                chapter_number,
+                review_item_id,
+                include_completed=True,
+            )
+
+        feedback = self._build_quiz_answer_feedback(
+            book_id=book_id,
+            chapter_number=chapter_number,
+            question=question,
+            selected_answer=selected_answer,
+            is_correct=is_correct,
+            citation=citation,
+            progress={},
+        )
+        return {
+            **feedback,
+            "review_result_status": result_status,
+            "review_item": self._to_review_item(updated_review_item),
+        }
 
     def get_quiz_progress(
         self,
@@ -1334,6 +1502,47 @@ class UploadedBookStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS review_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    missed_concept_id INTEGER NOT NULL,
+                    book_id INTEGER NOT NULL,
+                    chapter_number INTEGER NOT NULL,
+                    concept_name TEXT NOT NULL,
+                    question_id TEXT NOT NULL,
+                    review_focus TEXT NOT NULL,
+                    citation_id TEXT NOT NULL,
+                    source_location TEXT,
+                    page_number INTEGER,
+                    source_excerpt TEXT,
+                    stage TEXT NOT NULL,
+                    due_on TEXT,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    UNIQUE(missed_concept_id),
+                    FOREIGN KEY(missed_concept_id) REFERENCES missed_concepts(id),
+                    FOREIGN KEY(book_id) REFERENCES uploaded_books(id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS review_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    review_item_id INTEGER NOT NULL,
+                    selected_answer TEXT NOT NULL,
+                    is_correct INTEGER NOT NULL,
+                    previous_stage TEXT NOT NULL,
+                    next_stage TEXT NOT NULL,
+                    result_status TEXT NOT NULL,
+                    reviewed_at TEXT NOT NULL,
+                    FOREIGN KEY(review_item_id) REFERENCES review_items(id)
+                )
+                """
+            )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)
@@ -1477,6 +1686,35 @@ class UploadedBookStore:
             "source_excerpt": row["source_excerpt"],
         }
 
+    def _to_review_item(self, row: sqlite3.Row) -> dict[str, Any]:
+        review_item = {
+            "id": row["id"],
+            "missed_concept_id": row["missed_concept_id"],
+            "book_id": row["book_id"],
+            "chapter_number": row["chapter_number"],
+            "concept_name": row["concept_name"],
+            "question_id": row["question_id"],
+            "stage": row["stage"],
+            "due_on": row["due_on"],
+            "status": row["status"],
+            "review_focus": row["review_focus"],
+            "citation_id": row["citation_id"],
+            "source_location": row["source_location"],
+            "page_number": row["page_number"],
+            "source_excerpt": row["source_excerpt"],
+        }
+        if "last_selected_answer" in row.keys() and row["last_selected_answer"] is not None:
+            review_item["last_review_result"] = {
+                "selected_answer": row["last_selected_answer"],
+                "is_correct": bool(row["last_is_correct"]),
+                "previous_stage": row["last_previous_stage"],
+                "next_stage": row["last_next_stage"],
+                "result_status": row["last_result_status"],
+                "reviewed_at": row["last_reviewed_at"],
+            }
+
+        return review_item
+
     def _find_quiz_question(
         self,
         quiz: dict[str, Any],
@@ -1552,6 +1790,22 @@ class UploadedBookStore:
         chapter_number: int,
         question_id: str,
     ) -> None:
+        resolved_at = self._now().isoformat(timespec="seconds").replace("+00:00", "Z")
+        connection.execute(
+            """
+            UPDATE review_items
+            SET status = ?,
+                due_on = ?,
+                updated_at = ?,
+                completed_at = ?
+            WHERE missed_concept_id IN (
+                SELECT id
+                FROM missed_concepts
+                WHERE book_id = ? AND chapter_number = ? AND question_id = ?
+            )
+            """,
+            ("resolved", None, resolved_at, resolved_at, book_id, chapter_number, question_id),
+        )
         connection.execute(
             """
             DELETE FROM missed_concepts
@@ -1611,6 +1865,209 @@ class UploadedBookStore:
                 created_at,
             ),
         )
+        missed_concept = connection.execute(
+            """
+            SELECT
+                id,
+                book_id,
+                chapter_number,
+                concept_name,
+                question_id,
+                explanation,
+                citation_id,
+                source_location,
+                page_number,
+                source_excerpt
+            FROM missed_concepts
+            WHERE book_id = ? AND chapter_number = ? AND concept_name = ?
+            """,
+            (book_id, chapter_number, question["tested_concept"]),
+        ).fetchone()
+        if missed_concept is not None:
+            self._save_review_item_for_missed_concept(connection, missed_concept)
+
+    def _fetch_review_item_row(
+        self,
+        connection: sqlite3.Connection,
+        book_id: int,
+        chapter_number: int,
+        review_item_id: int,
+        *,
+        include_completed: bool = False,
+    ) -> sqlite3.Row | None:
+        status_filter = "" if include_completed else "AND status = 'active'"
+        return connection.execute(
+            f"""
+            SELECT
+                review_items.id,
+                review_items.missed_concept_id,
+                review_items.book_id,
+                review_items.chapter_number,
+                review_items.concept_name,
+                review_items.question_id,
+                review_items.review_focus,
+                review_items.citation_id,
+                review_items.source_location,
+                review_items.page_number,
+                review_items.source_excerpt,
+                review_items.stage,
+                review_items.due_on,
+                review_items.status,
+                latest_result.selected_answer AS last_selected_answer,
+                latest_result.is_correct AS last_is_correct,
+                latest_result.previous_stage AS last_previous_stage,
+                latest_result.next_stage AS last_next_stage,
+                latest_result.result_status AS last_result_status,
+                latest_result.reviewed_at AS last_reviewed_at
+            FROM review_items
+            LEFT JOIN (
+                SELECT review_results.*
+                FROM review_results
+                INNER JOIN (
+                    SELECT review_item_id, MAX(id) AS last_result_id
+                    FROM review_results
+                    GROUP BY review_item_id
+                ) latest
+                    ON review_results.id = latest.last_result_id
+            ) latest_result
+                ON latest_result.review_item_id = review_items.id
+            WHERE review_items.book_id = ?
+              AND review_items.chapter_number = ?
+              AND review_items.id = ?
+            {status_filter}
+            """,
+            (book_id, chapter_number, review_item_id),
+        ).fetchone()
+
+    def _save_review_item_for_missed_concept(
+        self,
+        connection: sqlite3.Connection,
+        missed_concept: sqlite3.Row,
+    ) -> None:
+        now = self._now()
+        now_iso = now.isoformat(timespec="seconds").replace("+00:00", "Z")
+        due_on = self._date_after_days(1)
+        connection.execute(
+            """
+            INSERT INTO review_items (
+                missed_concept_id,
+                book_id,
+                chapter_number,
+                concept_name,
+                question_id,
+                review_focus,
+                citation_id,
+                source_location,
+                page_number,
+                source_excerpt,
+                stage,
+                due_on,
+                status,
+                created_at,
+                updated_at,
+                completed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(missed_concept_id)
+            DO UPDATE SET
+                book_id = excluded.book_id,
+                chapter_number = excluded.chapter_number,
+                concept_name = excluded.concept_name,
+                question_id = excluded.question_id,
+                review_focus = excluded.review_focus,
+                citation_id = excluded.citation_id,
+                source_location = excluded.source_location,
+                page_number = excluded.page_number,
+                source_excerpt = excluded.source_excerpt,
+                stage = excluded.stage,
+                due_on = excluded.due_on,
+                status = excluded.status,
+                updated_at = excluded.updated_at,
+                completed_at = NULL
+            """,
+            (
+                missed_concept["id"],
+                missed_concept["book_id"],
+                missed_concept["chapter_number"],
+                missed_concept["concept_name"],
+                missed_concept["question_id"],
+                missed_concept["explanation"],
+                missed_concept["citation_id"],
+                missed_concept["source_location"],
+                missed_concept["page_number"],
+                missed_concept["source_excerpt"],
+                "day_1",
+                due_on,
+                "active",
+                now_iso,
+                now_iso,
+                None,
+            ),
+        )
+
+    def _save_review_result(
+        self,
+        *,
+        connection: sqlite3.Connection,
+        review_item_id: int,
+        selected_answer: str,
+        is_correct: bool,
+        previous_stage: str,
+        next_stage: str,
+        result_status: str,
+        reviewed_at: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO review_results (
+                review_item_id,
+                selected_answer,
+                is_correct,
+                previous_stage,
+                next_stage,
+                result_status,
+                reviewed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                review_item_id,
+                selected_answer,
+                int(is_correct),
+                previous_stage,
+                next_stage,
+                result_status,
+                reviewed_at,
+            ),
+        )
+
+    def _next_review_schedule(
+        self,
+        *,
+        previous_stage: str,
+        is_correct: bool,
+    ) -> tuple[str, str | None, str, str]:
+        if not is_correct:
+            return "day_1", self._date_after_days(1), "active", "reset"
+
+        if previous_stage == "day_1":
+            return "day_3", self._date_after_days(3), "active", "advanced"
+        if previous_stage == "day_3":
+            return "day_7", self._date_after_days(7), "active", "advanced"
+
+        return "day_7", None, "completed", "completed"
+
+    def _now(self) -> datetime:
+        now = self.clock()
+        if now.tzinfo is None:
+            return now.replace(tzinfo=UTC)
+        return now.astimezone(UTC)
+
+    def _today_iso(self) -> str:
+        return self._now().date().isoformat()
+
+    def _date_after_days(self, days: int) -> str:
+        return (self._now().date() + timedelta(days=days)).isoformat()
 
     def _build_quiz_answer_feedback(
         self,

@@ -18,9 +18,11 @@ try:
         get_missed_concepts_from_api,
         get_quiz_progress_from_api,
         get_quiz_from_api,
+        get_review_items_from_api,
         get_uploaded_books,
         retry_missed_question_to_api,
         save_chapter_boundaries_to_api,
+        submit_review_item_answer_to_api,
         submit_quiz_answer_to_api,
         upload_pdf_to_api,
     )
@@ -42,9 +44,11 @@ except ModuleNotFoundError as error:
         get_missed_concepts_from_api,
         get_quiz_progress_from_api,
         get_quiz_from_api,
+        get_review_items_from_api,
         get_uploaded_books,
         retry_missed_question_to_api,
         save_chapter_boundaries_to_api,
+        submit_review_item_answer_to_api,
         submit_quiz_answer_to_api,
         upload_pdf_to_api,
     )
@@ -526,6 +530,7 @@ def _render_review_tab(*, api_url: str, books_result: object | None) -> None:
         st.markdown("No missed concepts are due from checked answers.")
         return
 
+    any_due_reviews = False
     any_missed_concepts = False
     for book, chapters in accepted_chapters_by_book:
         for chapter in chapters:
@@ -544,9 +549,29 @@ def _render_review_tab(*, api_url: str, books_result: object | None) -> None:
                 book_id=int(book["id"]),
                 chapter_number=chapter_number,
             )
+            review_items_result = _load_review_items_result(
+                api_url=api_url,
+                book_id=int(book["id"]),
+                chapter_number=chapter_number,
+            )
             _render_last_retry_feedback(book_id=int(book["id"]), chapter_number=chapter_number)
+            _render_last_review_feedback(book_id=int(book["id"]), chapter_number=chapter_number)
+            if (
+                review_items_result is not None
+                and review_items_result.success
+                and review_items_result.review_items
+            ):
+                any_due_reviews = True
             if result is not None and result.success and result.missed_concepts:
                 any_missed_concepts = True
+            if review_items_result is not None:
+                _render_review_items_result(
+                    review_items_result,
+                    quiz_result=quiz_result,
+                    api_url=api_url,
+                    book_id=int(book["id"]),
+                    chapter_number=chapter_number,
+                )
             if result is not None:
                 _render_missed_concepts_result(
                     result,
@@ -556,6 +581,8 @@ def _render_review_tab(*, api_url: str, books_result: object | None) -> None:
                     chapter_number=chapter_number,
                 )
 
+    if not any_due_reviews:
+        st.markdown("No due reviews right now.")
     if not any_missed_concepts:
         st.markdown("No missed concepts are due from checked answers.")
 
@@ -576,6 +603,99 @@ def _load_missed_concepts_result(
             )
 
     return st.session_state.get(result_key)
+
+
+def _load_review_items_result(
+    *,
+    api_url: str,
+    book_id: int,
+    chapter_number: int,
+) -> object | None:
+    result_key = f"review_items_{book_id}_{chapter_number}"
+    if result_key not in st.session_state:
+        with st.spinner("Loading due reviews..."):
+            st.session_state[result_key] = get_review_items_from_api(
+                api_url,
+                book_id=book_id,
+                chapter_number=chapter_number,
+            )
+
+    return st.session_state.get(result_key)
+
+
+def _render_review_items_result(
+    result: object,
+    *,
+    quiz_result: object | None,
+    api_url: str,
+    book_id: int,
+    chapter_number: int,
+) -> None:
+    if not result.success:
+        st.error(result.message)
+        st.markdown(result.message)
+        if result.retryable:
+            st.markdown("Retry loading due reviews after FastAPI recovers.")
+        return
+
+    if not result.review_items:
+        if result.upcoming_review_items:
+            st.markdown("### Upcoming Reviews")
+            for item in result.upcoming_review_items:
+                st.markdown(f"**{item['concept_name']}**")
+                st.markdown(f"Next review: {item['due_on']}")
+        return
+
+    st.markdown("### Due Reviews")
+    questions_by_id = _questions_by_id(quiz_result)
+    for item in result.review_items:
+        review_item_id = int(item["id"])
+        question_id = str(item["question_id"])
+        st.markdown(f"**{item['concept_name']}**")
+        st.markdown(f"Stage: {item['stage']}")
+        st.markdown(f"Due: {item['due_on']}")
+        st.markdown(item["review_focus"])
+        st.markdown(f"Citation {item['citation_id']}")
+        if item.get("page_number"):
+            st.markdown(f"Page {item['page_number']}")
+        if item.get("source_excerpt"):
+            st.markdown(f"Source excerpt: {item['source_excerpt']}")
+
+        question = questions_by_id.get(question_id)
+        if question is None:
+            st.warning("Review question unavailable.")
+            st.markdown("Review question unavailable. Retry after Quiz reloads.")
+            continue
+
+        st.markdown(str(question["question_text"]))
+        selected_answer = st.radio(
+            f"Review answer for item {review_item_id}",
+            question["answer_options"],
+            key=f"review_answer_{book_id}_{chapter_number}_{review_item_id}",
+        )
+        if st.button(
+            f"Submit review item {review_item_id}",
+            key=f"submit_review_item_{book_id}_{chapter_number}_{review_item_id}",
+        ):
+            with st.spinner("Checking review answer..."):
+                answer_result = submit_review_item_answer_to_api(
+                    api_url,
+                    book_id=book_id,
+                    chapter_number=chapter_number,
+                    review_item_id=review_item_id,
+                    selected_answer=str(selected_answer),
+                )
+            if answer_result.success:
+                st.session_state[f"last_review_feedback_{book_id}_{chapter_number}"] = (
+                    answer_result
+                )
+                st.session_state.pop(f"review_items_{book_id}_{chapter_number}", None)
+                st.rerun()
+            else:
+                st.error(answer_result.message)
+                st.markdown(answer_result.message)
+                if answer_result.retryable:
+                    st.markdown("Retry this review after FastAPI recovers.")
 
 
 def _render_missed_concepts_result(
@@ -668,6 +788,24 @@ def _render_last_retry_feedback(*, book_id: int, chapter_number: int) -> None:
     elif retry_result.missed_concept_status == "active":
         st.warning("Missed Concept is still active.")
         st.markdown("Missed Concept is still active.")
+
+
+def _render_last_review_feedback(*, book_id: int, chapter_number: int) -> None:
+    review_result = st.session_state.get(f"last_review_feedback_{book_id}_{chapter_number}")
+    if review_result is None:
+        return
+
+    if review_result.success:
+        st.success(review_result.message)
+        st.markdown(review_result.message)
+        review_item = review_result.review_item or {}
+        if review_item.get("status") == "completed":
+            st.markdown("Review Item completed.")
+        elif review_item.get("due_on"):
+            st.markdown(f"Next review: {review_item['due_on']}")
+    else:
+        st.error(review_result.message)
+        st.markdown(review_result.message)
 
 
 def _load_quiz_result(
@@ -795,6 +933,7 @@ def _store_quiz_answer_feedback(
 ) -> None:
     progress_key = f"quiz_progress_{book_id}_{chapter_number}"
     missed_concepts_key = f"missed_concepts_{book_id}_{chapter_number}"
+    review_items_key = f"review_items_{book_id}_{chapter_number}"
     progress_result = st.session_state.get(progress_key)
     answer = {
         "question_id": answer_result.question_id,
@@ -819,6 +958,7 @@ def _store_quiz_answer_feedback(
         )
         if answer_result.is_correct is False or answer_result.missed_concept_status is not None:
             st.session_state.pop(missed_concepts_key, None)
+            st.session_state.pop(review_items_key, None)
         return
 
     answers = [
@@ -836,6 +976,7 @@ def _store_quiz_answer_feedback(
     )
     if answer_result.is_correct is False or answer_result.missed_concept_status is not None:
         st.session_state.pop(missed_concepts_key, None)
+        st.session_state.pop(review_items_key, None)
 
 
 def _render_quiz_answer_feedback(answer: dict[str, object]) -> None:

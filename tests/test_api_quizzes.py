@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 from fastapi.testclient import TestClient
 
 from smartread_api.main import create_app
@@ -269,6 +271,340 @@ def test_incorrect_quiz_answer_creates_missed_concept(tmp_path):
             ),
         }
     ]
+
+
+def test_missed_concept_creates_review_item_due_after_one_day(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    now = datetime(2026, 6, 28, 9, 0, tzinfo=UTC)
+    client = TestClient(
+        create_app(
+            database_path=tmp_path / "smartread.db",
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+            clock=lambda: now,
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Long-term memory"},
+    )
+    response = client.get(f"/books/{book_id}/chapter-boundaries/1/review-items")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"] == {"due_review_count": 0, "active_review_count": 1}
+    assert payload["review_items"] == []
+    assert payload["upcoming_review_items"] == [
+        {
+            "id": 1,
+            "missed_concept_id": 1,
+            "book_id": book_id,
+            "chapter_number": 1,
+            "concept_name": "Protected Attention",
+            "question_id": "q1",
+            "stage": "day_1",
+            "due_on": "2026-06-29",
+            "status": "active",
+            "review_focus": (
+                "Protected attention reduces constant switching so deliberate practice is "
+                "easier to repeat."
+            ),
+            "citation_id": "qc1",
+            "source_location": f"book:{book_id}:page:1",
+            "page_number": 1,
+            "source_excerpt": (
+                "Deep focus protects attention from constant switching so learners can "
+                "practice deliberately."
+            ),
+        }
+    ]
+
+
+def test_correct_review_advances_from_one_day_to_three_day_stage(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    current_time = {"now": datetime(2026, 6, 28, 9, 0, tzinfo=UTC)}
+    client = TestClient(
+        create_app(
+            database_path=tmp_path / "smartread.db",
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+            clock=lambda: current_time["now"],
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Long-term memory"},
+    )
+    current_time["now"] = datetime(2026, 6, 29, 9, 0, tzinfo=UTC)
+
+    response = client.post(
+        f"/books/{book_id}/chapter-boundaries/1/review-items/1/answer",
+        json={"selected_answer": "Constant switching"},
+    )
+    queue_response = client.get(f"/books/{book_id}/chapter-boundaries/1/review-items")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["selected_answer"] == "Constant switching"
+    assert payload["is_correct"] is True
+    assert payload["review_result_status"] == "advanced"
+    assert payload["review_item"]["stage"] == "day_3"
+    assert payload["review_item"]["due_on"] == "2026-07-02"
+    assert payload["review_item"]["status"] == "active"
+    assert queue_response.json()["summary"] == {
+        "due_review_count": 0,
+        "active_review_count": 1,
+    }
+    assert queue_response.json()["upcoming_review_items"][0]["stage"] == "day_3"
+
+
+def test_correct_missed_question_retry_clears_related_review_item(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    current_time = {"now": datetime(2026, 6, 28, 9, 0, tzinfo=UTC)}
+    client = TestClient(
+        create_app(
+            database_path=tmp_path / "smartread.db",
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+            clock=lambda: current_time["now"],
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Long-term memory"},
+    )
+    current_time["now"] = datetime(2026, 6, 29, 9, 0, tzinfo=UTC)
+
+    retry_response = client.post(
+        f"/books/{book_id}/chapter-boundaries/1/missed-concepts/q1/retry",
+        json={"selected_answer": "Constant switching"},
+    )
+    queue_response = client.get(f"/books/{book_id}/chapter-boundaries/1/review-items")
+
+    assert retry_response.status_code == 200
+    assert retry_response.json()["missed_concept_status"] == "resolved"
+    assert queue_response.json() == {
+        "book_id": book_id,
+        "chapter_number": 1,
+        "summary": {"due_review_count": 0, "active_review_count": 0},
+        "review_items": [],
+        "upcoming_review_items": [],
+    }
+
+
+def test_review_stage_due_date_and_result_reload_after_restart(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    database_path = tmp_path / "smartread.db"
+    current_time = {"now": datetime(2026, 6, 28, 9, 0, tzinfo=UTC)}
+    client = TestClient(
+        create_app(
+            database_path=database_path,
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+            clock=lambda: current_time["now"],
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Long-term memory"},
+    )
+    current_time["now"] = datetime(2026, 6, 29, 9, 0, tzinfo=UTC)
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/review-items/1/answer",
+        json={"selected_answer": "Constant switching"},
+    )
+
+    reloaded_client = TestClient(
+        create_app(
+            database_path=database_path,
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+            clock=lambda: current_time["now"],
+        )
+    )
+    response = reloaded_client.get(f"/books/{book_id}/chapter-boundaries/1/review-items")
+
+    assert response.status_code == 200
+    review_item = response.json()["upcoming_review_items"][0]
+    assert review_item["stage"] == "day_3"
+    assert review_item["due_on"] == "2026-07-02"
+    assert review_item["last_review_result"] == {
+        "selected_answer": "Constant switching",
+        "is_correct": True,
+        "previous_stage": "day_1",
+        "next_stage": "day_3",
+        "result_status": "advanced",
+        "reviewed_at": "2026-06-29T09:00:00Z",
+    }
+
+
+def test_due_review_items_appear_when_current_date_reaches_due_date(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    current_time = {"now": datetime(2026, 6, 28, 9, 0, tzinfo=UTC)}
+    client = TestClient(
+        create_app(
+            database_path=tmp_path / "smartread.db",
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+            clock=lambda: current_time["now"],
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Long-term memory"},
+    )
+    current_time["now"] = datetime(2026, 6, 29, 9, 0, tzinfo=UTC)
+
+    response = client.get(f"/books/{book_id}/chapter-boundaries/1/review-items")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"] == {"due_review_count": 1, "active_review_count": 1}
+    assert payload["review_items"][0]["concept_name"] == "Protected Attention"
+    assert payload["upcoming_review_items"] == []
+
+
+def test_correct_reviews_advance_to_seven_day_stage_then_complete(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    current_time = {"now": datetime(2026, 6, 28, 9, 0, tzinfo=UTC)}
+    client = TestClient(
+        create_app(
+            database_path=tmp_path / "smartread.db",
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+            clock=lambda: current_time["now"],
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Long-term memory"},
+    )
+    current_time["now"] = datetime(2026, 6, 29, 9, 0, tzinfo=UTC)
+    day_three_response = client.post(
+        f"/books/{book_id}/chapter-boundaries/1/review-items/1/answer",
+        json={"selected_answer": "Constant switching"},
+    )
+    current_time["now"] = datetime(2026, 7, 2, 9, 0, tzinfo=UTC)
+    day_seven_response = client.post(
+        f"/books/{book_id}/chapter-boundaries/1/review-items/1/answer",
+        json={"selected_answer": "Constant switching"},
+    )
+    current_time["now"] = datetime(2026, 7, 9, 9, 0, tzinfo=UTC)
+    completed_response = client.post(
+        f"/books/{book_id}/chapter-boundaries/1/review-items/1/answer",
+        json={"selected_answer": "Constant switching"},
+    )
+    queue_response = client.get(f"/books/{book_id}/chapter-boundaries/1/review-items")
+
+    assert day_three_response.json()["review_item"]["stage"] == "day_3"
+    assert day_three_response.json()["review_item"]["due_on"] == "2026-07-02"
+    assert day_seven_response.json()["review_item"]["stage"] == "day_7"
+    assert day_seven_response.json()["review_item"]["due_on"] == "2026-07-09"
+    assert completed_response.json()["review_result_status"] == "completed"
+    assert completed_response.json()["review_item"]["stage"] == "day_7"
+    assert completed_response.json()["review_item"]["due_on"] is None
+    assert completed_response.json()["review_item"]["status"] == "completed"
+    assert queue_response.json()["summary"] == {
+        "due_review_count": 0,
+        "active_review_count": 0,
+    }
+
+
+def test_incorrect_review_resets_schedule_to_one_day_stage(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    current_time = {"now": datetime(2026, 6, 28, 9, 0, tzinfo=UTC)}
+    client = TestClient(
+        create_app(
+            database_path=tmp_path / "smartread.db",
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+            clock=lambda: current_time["now"],
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Long-term memory"},
+    )
+    current_time["now"] = datetime(2026, 6, 29, 9, 0, tzinfo=UTC)
+
+    response = client.post(
+        f"/books/{book_id}/chapter-boundaries/1/review-items/1/answer",
+        json={"selected_answer": "Chapter boundaries"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["is_correct"] is False
+    assert payload["review_result_status"] == "reset"
+    assert payload["review_item"]["stage"] == "day_1"
+    assert payload["review_item"]["due_on"] == "2026-06-30"
+    assert payload["review_item"]["status"] == "active"
+
+
+def test_duplicate_active_review_items_for_same_missed_concept_are_avoided(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    client = TestClient(
+        create_app(
+            database_path=tmp_path / "smartread.db",
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+            clock=lambda: datetime(2026, 6, 28, 9, 0, tzinfo=UTC),
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Long-term memory"},
+    )
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q3",
+        json={"selected_answer": "Retrieval Cues"},
+    )
+    response = client.get(f"/books/{book_id}/chapter-boundaries/1/review-items")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"] == {"due_review_count": 0, "active_review_count": 1}
+    assert len(payload["upcoming_review_items"]) == 1
+    assert payload["upcoming_review_items"][0]["question_id"] == "q3"
+
+
+def test_submit_review_item_answer_rejects_invalid_review_item_id(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    client = TestClient(
+        create_app(
+            database_path=tmp_path / "smartread.db",
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+
+    response = client.post(
+        f"/books/{book_id}/chapter-boundaries/1/review-items/999/answer",
+        json={"selected_answer": "Constant switching"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Review Item was not found."
 
 
 def test_correct_quiz_answer_does_not_create_missed_concept(tmp_path):

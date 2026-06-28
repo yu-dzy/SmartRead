@@ -17,6 +17,8 @@ from smartread_frontend.uploads import (
     QuizAnswerResult,
     QuizProgressResult,
     QuizResult,
+    ReviewAnswerResult,
+    ReviewItemsResult,
     UploadResult,
 )
 
@@ -70,6 +72,21 @@ def _empty_missed_concepts_result(
     )
 
 
+def _empty_review_items_result(
+    api_base_url: str,
+    *,
+    book_id: int,
+    chapter_number: int,
+) -> ReviewItemsResult:
+    return ReviewItemsResult(
+        success=True,
+        message="Review queue loaded.",
+        summary={"due_review_count": 0, "active_review_count": 0},
+        review_items=[],
+        upcoming_review_items=[],
+    )
+
+
 @pytest.fixture(autouse=True)
 def stub_missed_concepts_loader(monkeypatch):
     import smartread_frontend.uploads as uploads_module
@@ -78,6 +95,12 @@ def stub_missed_concepts_loader(monkeypatch):
         uploads_module,
         "get_missed_concepts_from_api",
         _empty_missed_concepts_result,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "get_review_items_from_api",
+        _empty_review_items_result,
         raising=False,
     )
 
@@ -2653,6 +2676,299 @@ def test_streamlit_review_tab_retries_only_missed_questions(monkeypatch):
     assert "Correct: 1" in page_text
     assert "Incorrect: 0" in page_text
     assert "No missed concepts are due from checked answers." in page_text
+
+
+def test_streamlit_review_tab_displays_due_reviews_and_submits_answer(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 31,
+            "original_filename": "due-review.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 31,
+            "chapter_number": 1,
+            "title": "Due Review",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:31:page:1",
+            "end_source_location": "book:31:page:2",
+            "review_status": "accepted",
+        }
+    ]
+    submitted: dict[str, object] = {}
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    def fake_get_quiz_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> QuizResult:
+        return QuizResult(
+            success=True,
+            message="Quiz loaded for Chapter 1: Due Review.",
+            chapter=accepted_chapters[0],
+            generation_status="generated",
+            quiz=_sample_quiz_content(),
+        )
+
+    def fake_get_review_items_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> ReviewItemsResult:
+        if submitted:
+            return ReviewItemsResult(
+                success=True,
+                message="Review queue loaded.",
+                summary={"due_review_count": 0, "active_review_count": 1},
+                review_items=[],
+                upcoming_review_items=[
+                    {
+                        "id": 4,
+                        "missed_concept_id": 8,
+                        "book_id": book_id,
+                        "chapter_number": chapter_number,
+                        "concept_name": "Protected Attention",
+                        "question_id": "q1",
+                        "stage": "day_3",
+                        "due_on": "2026-07-02",
+                        "status": "active",
+                        "review_focus": "Protected attention reduces constant switching.",
+                        "citation_id": "qc1",
+                        "source_location": "book:31:page:1",
+                        "page_number": 1,
+                        "source_excerpt": "Protected attention reduces constant switching.",
+                    }
+                ],
+            )
+        return ReviewItemsResult(
+            success=True,
+            message="Review queue loaded.",
+            summary={"due_review_count": 1, "active_review_count": 1},
+            review_items=[
+                {
+                    "id": 4,
+                    "missed_concept_id": 8,
+                    "book_id": book_id,
+                    "chapter_number": chapter_number,
+                    "concept_name": "Protected Attention",
+                    "question_id": "q1",
+                    "stage": "day_1",
+                    "due_on": "2026-06-29",
+                    "status": "active",
+                    "review_focus": "Protected attention reduces constant switching.",
+                    "citation_id": "qc1",
+                    "source_location": "book:31:page:1",
+                    "page_number": 1,
+                    "source_excerpt": "Protected attention reduces constant switching.",
+                }
+            ],
+            upcoming_review_items=[],
+        )
+
+    def fake_submit_review_item_answer_to_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+        review_item_id: int,
+        selected_answer: str,
+    ) -> ReviewAnswerResult:
+        submitted.update(
+            {
+                "book_id": book_id,
+                "chapter_number": chapter_number,
+                "review_item_id": review_item_id,
+                "selected_answer": selected_answer,
+            }
+        )
+        return ReviewAnswerResult(
+            success=True,
+            message="Review advanced.",
+            review_item_id=review_item_id,
+            selected_answer=selected_answer,
+            is_correct=True,
+            correct_answer="Constant switching",
+            explanation="Protected attention reduces constant switching.",
+            tested_concept="Protected Attention",
+            citation_id="qc1",
+            source_location="book:31:page:1",
+            page_number=1,
+            source_excerpt="Protected attention reduces constant switching.",
+            review_result_status="advanced",
+            review_item={
+                "id": review_item_id,
+                "stage": "day_3",
+                "due_on": "2026-07-02",
+                "status": "active",
+            },
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(uploads_module, "get_chapter_summary_from_api", _empty_summary_result)
+    monkeypatch.setattr(uploads_module, "get_concepts_takeaways_from_api", _empty_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", fake_get_quiz_from_api)
+    monkeypatch.setattr(uploads_module, "get_quiz_progress_from_api", _empty_quiz_progress_result)
+    monkeypatch.setattr(uploads_module, "get_missed_concepts_from_api", _empty_missed_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_review_items_from_api", fake_get_review_items_from_api)
+    monkeypatch.setattr(
+        uploads_module,
+        "submit_review_item_answer_to_api",
+        fake_submit_review_item_answer_to_api,
+    )
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+    assert "### Due Reviews" in page_text
+    assert "Protected Attention" in page_text
+    assert "Stage: day_1" in page_text
+    assert "Review answer for item 4" in [radio.label for radio in app.radio]
+
+    review_radio = next(radio for radio in app.radio if radio.label == "Review answer for item 4")
+    review_radio.set_value("Constant switching")
+    review_button = next(button for button in app.button if button.label == "Submit review item 4")
+    review_button.click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert submitted == {
+        "book_id": 31,
+        "chapter_number": 1,
+        "review_item_id": 4,
+        "selected_answer": "Constant switching",
+    }
+    assert "Review advanced." in page_text
+    assert "Next review: 2026-07-02" in page_text
+
+
+def test_streamlit_review_tab_shows_recoverable_review_queue_error(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 32,
+            "original_filename": "review-error.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 32,
+            "chapter_number": 1,
+            "title": "Review Error",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:32:page:1",
+            "end_source_location": "book:32:page:2",
+            "review_status": "accepted",
+        }
+    ]
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    def fake_get_review_items_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> ReviewItemsResult:
+        return ReviewItemsResult(
+            success=False,
+            message="Review queue could not be loaded. Check FastAPI, then try again.",
+            summary={},
+            review_items=[],
+            upcoming_review_items=[],
+            retryable=True,
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(uploads_module, "get_chapter_summary_from_api", _empty_summary_result)
+    monkeypatch.setattr(uploads_module, "get_concepts_takeaways_from_api", _empty_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", _empty_quiz_result)
+    monkeypatch.setattr(uploads_module, "get_missed_concepts_from_api", _empty_missed_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_review_items_from_api", fake_get_review_items_from_api)
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+    assert "Review queue could not be loaded. Check FastAPI, then try again." in page_text
+    assert "Retry loading due reviews after FastAPI recovers." in page_text
 
 
 def test_streamlit_review_tab_shows_recoverable_retry_failure(monkeypatch):
