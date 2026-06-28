@@ -1,6 +1,7 @@
 import httpx
 
 from smartread_frontend.uploads import (
+    delete_uploaded_book_from_api,
     detect_chapters_from_api,
     extract_pdf_text_from_api,
     generate_chapter_summary_from_api,
@@ -92,6 +93,41 @@ def test_get_uploaded_books_returns_books_from_api():
 
     assert result.success is True
     assert result.books[0]["original_filename"] == "deep-work.pdf"
+
+
+def test_delete_uploaded_book_from_api_reports_success():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert str(request.url) == "http://api.test/books/7"
+        return httpx.Response(
+            200,
+            json={
+                "deleted": True,
+                "book_id": 7,
+                "message": "Uploaded Book and related learning data were deleted.",
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = delete_uploaded_book_from_api("http://api.test", book_id=7, client=client)
+
+    assert result.success is True
+    assert result.message == "Uploaded Book and related learning data were deleted."
+    assert result.book_id == 7
+
+
+def test_delete_uploaded_book_from_api_reports_recoverable_backend_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("backend down", request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = delete_uploaded_book_from_api("http://api.test", book_id=7, client=client)
+
+    assert result.success is False
+    assert result.retryable is True
+    assert result.message == "Delete failed. Check FastAPI, then try again."
 
 
 def test_upload_pdf_to_api_reports_retryable_backend_error():

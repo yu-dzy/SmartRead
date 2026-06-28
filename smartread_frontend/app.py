@@ -6,6 +6,7 @@ import streamlit as st
 try:
     from smartread_frontend.health import get_api_status
     from smartread_frontend.uploads import (
+        delete_uploaded_book_from_api,
         detect_chapters_from_api,
         extract_pdf_text_from_api,
         generate_chapter_summary_from_api,
@@ -32,6 +33,7 @@ except ModuleNotFoundError as error:
 
     from health import get_api_status
     from uploads import (
+        delete_uploaded_book_from_api,
         detect_chapters_from_api,
         extract_pdf_text_from_api,
         generate_chapter_summary_from_api,
@@ -167,6 +169,23 @@ def main() -> None:
                             chapters=st.session_state[review_key],
                             review_key=review_key,
                         )
+                st.markdown("Deleting removes the private upload and generated learning data.")
+                if st.button("Delete uploaded book", key=f"delete_{book['id']}"):
+                    with st.spinner("Deleting uploaded book..."):
+                        delete_result = delete_uploaded_book_from_api(
+                            api_url,
+                            book_id=int(book["id"]),
+                        )
+                    if delete_result.success:
+                        st.success(delete_result.message)
+                        st.markdown(delete_result.message)
+                        books_result = get_uploaded_books(api_url)
+                        st.rerun()
+                    else:
+                        st.error(delete_result.message)
+                        st.markdown(delete_result.message)
+                        if delete_result.retryable:
+                            st.markdown("Retry deleting this private upload after FastAPI recovers.")
 
     with center:
         st.markdown("## Chapter Lesson")

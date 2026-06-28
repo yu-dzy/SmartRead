@@ -2,7 +2,7 @@
 
 SmartRead is a private learning system for cited chapter lessons, active recall, and targeted review.
 
-## Issue #13 Lightweight Spaced Review Queue Slice
+## Issue #14 Persistence, Privacy, And Recovery Slice
 
 Start the FastAPI backend:
 
@@ -44,6 +44,10 @@ Incorrect objective answers create Missed Concepts linked to the tested Core Con
 Use the Review tab to retry only active missed questions. Correctly answered questions stay unchanged and are not shown in the retry flow. Retried answers are graded by application code, update the saved answer, recalculate mastery, and persist after restart. A correct retry resolves the linked Missed Concept; another incorrect retry keeps it active without creating duplicate retry records.
 
 Active Missed Concepts now create lightweight Review Items with due dates. The Review tab shows currently due reviews, keeps upcoming reviews out of the due flow, grades review answers in application code, advances successful reviews through 1-day, 3-day, and 7-day stages, completes the item after a successful 7-day review, and resets the item to the 1-day stage after an incorrect review. Review stage, due date, completion status, and latest review result persist after restart.
+
+Uploaded Books and generated learning data are scoped to a local owner identifier. API clients may pass `X-SmartRead-Owner`; when the header is omitted, SmartRead uses the default local owner. The Uploaded Books list includes a delete action that removes the private upload and related pages, chapters, generated lessons, quiz answers, Missed Concepts, Review Items, and review results. Stale source, citation, quiz, and review URLs return not found after deletion.
+
+The review queue also repairs a representative partial-failure case: if a Missed Concept exists but its Review Item was not saved, loading the review queue recreates one active Review Item without duplicating it. Failed summary generation can be retried safely because the failed status is overwritten by the successful retry.
 
 Real Summary, Core Concepts, Key Takeaways, and Quiz generation use OpenAI by default with model `gpt-5.5`. Set the API key before starting FastAPI:
 

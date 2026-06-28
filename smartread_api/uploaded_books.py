@@ -103,11 +103,13 @@ class UploadedBookStore:
     def save_uploaded_pdf(
         self,
         *,
+        owner_id: str = "local-user",
         original_filename: str,
         content_type: str,
         content: bytes,
     ) -> dict[str, Any]:
         return self._save_pdf_metadata(
+            owner_id=owner_id,
             original_filename=original_filename,
             content_type=content_type,
             content=content,
@@ -119,12 +121,14 @@ class UploadedBookStore:
     def save_failed_pdf(
         self,
         *,
+        owner_id: str = "local-user",
         original_filename: str,
         content_type: str,
         content: bytes,
         error_message: str,
     ) -> dict[str, Any]:
         return self._save_pdf_metadata(
+            owner_id=owner_id,
             original_filename=original_filename,
             content_type=content_type,
             content=content,
@@ -133,13 +137,76 @@ class UploadedBookStore:
             error_message=error_message,
         )
 
-    def list_uploaded_books(self) -> list[dict[str, Any]]:
+    def list_uploaded_books(self, owner_id: str = "local-user") -> list[dict[str, Any]]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM uploaded_books ORDER BY uploaded_at DESC, id DESC"
+                """
+                SELECT * FROM uploaded_books
+                WHERE owner_id = ?
+                ORDER BY uploaded_at DESC, id DESC
+                """,
+                (owner_id,),
             ).fetchall()
 
         return [self._to_uploaded_book(row) for row in rows]
+
+    def assert_uploaded_book_owner(self, book_id: int, owner_id: str) -> None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM uploaded_books WHERE id = ? AND owner_id = ?",
+                (book_id, owner_id),
+            ).fetchone()
+            if row is None:
+                raise UploadedBookNotFoundError
+
+    def uploaded_book_exists(self, book_id: int) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM uploaded_books WHERE id = ?",
+                (book_id,),
+            ).fetchone()
+        return row is not None
+
+    def delete_uploaded_book(self, book_id: int) -> dict[str, Any]:
+        with self._connect() as connection:
+            book_row = connection.execute(
+                "SELECT id FROM uploaded_books WHERE id = ?",
+                (book_id,),
+            ).fetchone()
+            if book_row is None:
+                raise UploadedBookNotFoundError
+
+            review_item_rows = connection.execute(
+                "SELECT id FROM review_items WHERE book_id = ?",
+                (book_id,),
+            ).fetchall()
+            review_item_ids = [row["id"] for row in review_item_rows]
+            if review_item_ids:
+                placeholders = ", ".join("?" for _ in review_item_ids)
+                connection.execute(
+                    f"DELETE FROM review_results WHERE review_item_id IN ({placeholders})",
+                    review_item_ids,
+                )
+
+            for table in [
+                "review_items",
+                "missed_concepts",
+                "quiz_answers",
+                "chapter_quizzes",
+                "chapter_concepts_takeaways",
+                "chapter_summaries",
+                "accepted_chapters",
+                "detected_chapters",
+                "source_pages",
+            ]:
+                connection.execute(f"DELETE FROM {table} WHERE book_id = ?", (book_id,))
+            connection.execute("DELETE FROM uploaded_books WHERE id = ?", (book_id,))
+
+        return {
+            "deleted": True,
+            "book_id": book_id,
+            "message": "Uploaded Book and related learning data were deleted.",
+        }
 
     def extract_pages_for_book(self, book_id: int) -> dict[str, Any]:
         with self._connect() as connection:
@@ -969,6 +1036,11 @@ class UploadedBookStore:
         self.get_accepted_chapter_source_pages(book_id, chapter_number)
         today = self._today_iso()
         with self._connect() as connection:
+            self._repair_missing_review_items(
+                connection=connection,
+                book_id=book_id,
+                chapter_number=chapter_number,
+            )
             rows = connection.execute(
                 """
                 SELECT
@@ -1258,6 +1330,7 @@ class UploadedBookStore:
     def _save_pdf_metadata(
         self,
         *,
+        owner_id: str,
         original_filename: str,
         content_type: str,
         content: bytes,
@@ -1274,6 +1347,7 @@ class UploadedBookStore:
                 cursor = connection.execute(
                     """
                     INSERT INTO uploaded_books (
+                        owner_id,
                         original_filename,
                         content_type,
                         file_size,
@@ -1284,9 +1358,10 @@ class UploadedBookStore:
                         processing_status,
                         error_message
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
+                        owner_id,
                         original_filename,
                         content_type,
                         file_size,
@@ -1302,6 +1377,7 @@ class UploadedBookStore:
             except sqlite3.IntegrityError:
                 return self._find_by_fingerprint(
                     connection,
+                    owner_id=owner_id,
                     original_filename=original_filename,
                     file_size=file_size,
                     content_sha256=content_sha256,
@@ -1320,6 +1396,7 @@ class UploadedBookStore:
                 """
                 CREATE TABLE IF NOT EXISTS uploaded_books (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_id TEXT NOT NULL DEFAULT 'local-user',
                     original_filename TEXT NOT NULL,
                     content_type TEXT NOT NULL,
                     file_size INTEGER NOT NULL,
@@ -1333,7 +1410,7 @@ class UploadedBookStore:
                     chapter_detection_confidence TEXT,
                     chapter_detection_message TEXT,
                     chapter_review_status TEXT NOT NULL DEFAULT 'not_started',
-                    UNIQUE(original_filename, file_size, content_sha256)
+                    UNIQUE(owner_id, original_filename, file_size, content_sha256)
                 )
                 """
             )
@@ -1367,6 +1444,15 @@ class UploadedBookStore:
                     ADD COLUMN chapter_review_status TEXT NOT NULL DEFAULT 'not_started'
                     """
                 )
+            if "owner_id" not in columns:
+                connection.execute(
+                    """
+                    ALTER TABLE uploaded_books
+                    ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'local-user'
+                    """
+                )
+            if self._has_legacy_uploaded_book_unique_constraint(connection):
+                self._rebuild_uploaded_books_with_owner_unique_constraint(connection)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS source_pages (
@@ -1549,10 +1635,95 @@ class UploadedBookStore:
         connection.row_factory = sqlite3.Row
         return connection
 
+    def _has_legacy_uploaded_book_unique_constraint(
+        self,
+        connection: sqlite3.Connection,
+    ) -> bool:
+        for index_row in connection.execute("PRAGMA index_list(uploaded_books)").fetchall():
+            if not index_row["unique"]:
+                continue
+            index_name = str(index_row["name"]).replace('"', '""')
+            columns = [
+                row["name"]
+                for row in connection.execute(f'PRAGMA index_info("{index_name}")').fetchall()
+            ]
+            if columns == ["original_filename", "file_size", "content_sha256"]:
+                return True
+        return False
+
+    def _rebuild_uploaded_books_with_owner_unique_constraint(
+        self,
+        connection: sqlite3.Connection,
+    ) -> None:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute(
+            """
+            CREATE TABLE uploaded_books_owner_migration (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id TEXT NOT NULL DEFAULT 'local-user',
+                original_filename TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                file_size INTEGER NOT NULL,
+                content_sha256 TEXT NOT NULL,
+                uploaded_at TEXT NOT NULL,
+                upload_status TEXT NOT NULL,
+                processing_status TEXT NOT NULL,
+                error_message TEXT,
+                pdf_content BLOB,
+                chapter_detection_status TEXT NOT NULL DEFAULT 'not_started',
+                chapter_detection_confidence TEXT,
+                chapter_detection_message TEXT,
+                chapter_review_status TEXT NOT NULL DEFAULT 'not_started',
+                UNIQUE(owner_id, original_filename, file_size, content_sha256)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO uploaded_books_owner_migration (
+                id,
+                owner_id,
+                original_filename,
+                content_type,
+                file_size,
+                content_sha256,
+                uploaded_at,
+                upload_status,
+                processing_status,
+                error_message,
+                pdf_content,
+                chapter_detection_status,
+                chapter_detection_confidence,
+                chapter_detection_message,
+                chapter_review_status
+            )
+            SELECT
+                id,
+                owner_id,
+                original_filename,
+                content_type,
+                file_size,
+                content_sha256,
+                uploaded_at,
+                upload_status,
+                processing_status,
+                error_message,
+                pdf_content,
+                chapter_detection_status,
+                chapter_detection_confidence,
+                chapter_detection_message,
+                chapter_review_status
+            FROM uploaded_books
+            """
+        )
+        connection.execute("DROP TABLE uploaded_books")
+        connection.execute("ALTER TABLE uploaded_books_owner_migration RENAME TO uploaded_books")
+
     def _find_by_fingerprint(
         self,
         connection: sqlite3.Connection,
         *,
+        owner_id: str,
         original_filename: str,
         file_size: int,
         content_sha256: str,
@@ -1560,11 +1731,12 @@ class UploadedBookStore:
         row = connection.execute(
             """
             SELECT * FROM uploaded_books
-            WHERE original_filename = ?
+            WHERE owner_id = ?
+              AND original_filename = ?
               AND file_size = ?
               AND content_sha256 = ?
             """,
-            (original_filename, file_size, content_sha256),
+            (owner_id, original_filename, file_size, content_sha256),
         ).fetchone()
 
         return self._to_uploaded_book(row)
@@ -2004,6 +2176,38 @@ class UploadedBookStore:
                 None,
             ),
         )
+
+    def _repair_missing_review_items(
+        self,
+        *,
+        connection: sqlite3.Connection,
+        book_id: int,
+        chapter_number: int,
+    ) -> None:
+        missed_concept_rows = connection.execute(
+            """
+            SELECT
+                missed_concepts.id,
+                missed_concepts.book_id,
+                missed_concepts.chapter_number,
+                missed_concepts.concept_name,
+                missed_concepts.question_id,
+                missed_concepts.explanation,
+                missed_concepts.citation_id,
+                missed_concepts.source_location,
+                missed_concepts.page_number,
+                missed_concepts.source_excerpt
+            FROM missed_concepts
+            LEFT JOIN review_items
+                ON review_items.missed_concept_id = missed_concepts.id
+            WHERE missed_concepts.book_id = ?
+              AND missed_concepts.chapter_number = ?
+              AND review_items.id IS NULL
+            """,
+            (book_id, chapter_number),
+        ).fetchall()
+        for missed_concept in missed_concept_rows:
+            self._save_review_item_for_missed_concept(connection, missed_concept)
 
     def _save_review_result(
         self,
