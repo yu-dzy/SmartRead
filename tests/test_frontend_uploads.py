@@ -3,6 +3,9 @@ import httpx
 from smartread_frontend.uploads import (
     detect_chapters_from_api,
     extract_pdf_text_from_api,
+    generate_chapter_summary_from_api,
+    get_chapter_boundaries_from_api,
+    get_chapter_summary_from_api,
     get_uploaded_books,
     save_chapter_boundaries_to_api,
     upload_pdf_to_api,
@@ -321,3 +324,140 @@ def test_save_chapter_boundaries_to_api_reports_retryable_validation_error():
     assert result.success is False
     assert result.message == "Accepted chapter boundaries cannot overlap."
     assert result.retryable is True
+
+
+def test_get_chapter_boundaries_from_api_returns_accepted_chapters():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert str(request.url) == "http://api.test/books/7/chapter-boundaries"
+        return httpx.Response(
+            200,
+            json={
+                "chapters": [
+                    {
+                        "book_id": 7,
+                        "chapter_number": 1,
+                        "title": "Deep Focus",
+                        "start_page": 1,
+                        "end_page": 2,
+                        "start_source_location": "book:7:page:1",
+                        "end_source_location": "book:7:page:2",
+                        "review_status": "accepted",
+                    }
+                ]
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = get_chapter_boundaries_from_api("http://api.test", book_id=7, client=client)
+
+    assert result.success is True
+    assert result.chapters[0]["title"] == "Deep Focus"
+
+
+def test_generate_chapter_summary_from_api_reports_persisted_summary():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert str(request.url) == "http://api.test/books/7/chapter-boundaries/1/summary"
+        return httpx.Response(
+            200,
+            json={
+                "book_id": 7,
+                "chapter_number": 1,
+                "chapter": {
+                    "book_id": 7,
+                    "chapter_number": 1,
+                    "title": "Deep Focus",
+                    "start_page": 1,
+                    "end_page": 2,
+                    "start_source_location": "book:7:page:1",
+                    "end_source_location": "book:7:page:2",
+                    "review_status": "accepted",
+                },
+                "generation_status": "generated",
+                "generation_error": None,
+                "provider": "openai",
+                "model": "gpt-5.5",
+                "generated_at": "2026-06-28T07:00:00Z",
+                "summary": {
+                    "central_argument": {
+                        "claim": "Focus improves when attention is protected.",
+                        "citation_ids": ["c1"],
+                    },
+                    "supporting_ideas": [],
+                    "citations": [
+                        {
+                            "id": "c1",
+                            "source_location": "book:7:page:1",
+                            "page_number": 1,
+                            "source_excerpt": "Focus improves when attention is protected.",
+                        }
+                    ],
+                },
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = generate_chapter_summary_from_api(
+        "http://api.test",
+        book_id=7,
+        chapter_number=1,
+        client=client,
+    )
+
+    assert result.success is True
+    assert result.message == "Summary generated for Chapter 1: Deep Focus."
+    assert result.summary is not None
+    assert result.summary["central_argument"]["claim"] == "Focus improves when attention is protected."
+
+
+def test_get_chapter_summary_from_api_loads_persisted_summary():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert str(request.url) == "http://api.test/books/7/chapter-boundaries/1/summary"
+        return httpx.Response(
+            200,
+            json={
+                "book_id": 7,
+                "chapter_number": 1,
+                "chapter": {
+                    "book_id": 7,
+                    "chapter_number": 1,
+                    "title": "Deep Focus",
+                    "start_page": 1,
+                    "end_page": 2,
+                    "start_source_location": "book:7:page:1",
+                    "end_source_location": "book:7:page:2",
+                    "review_status": "accepted",
+                },
+                "generation_status": "generated",
+                "generation_error": None,
+                "provider": "openai",
+                "model": "gpt-5.5",
+                "generated_at": "2026-06-28T07:00:00Z",
+                "summary": {
+                    "central_argument": {
+                        "claim": "Persisted focus summary.",
+                        "citation_ids": ["c1"],
+                    },
+                    "supporting_ideas": [],
+                    "citations": [],
+                },
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = get_chapter_summary_from_api(
+        "http://api.test",
+        book_id=7,
+        chapter_number=1,
+        client=client,
+    )
+
+    assert result.success is True
+    assert result.message == "Summary loaded for Chapter 1: Deep Focus."
+    assert result.summary is not None
+    assert result.summary["central_argument"]["claim"] == "Persisted focus summary."

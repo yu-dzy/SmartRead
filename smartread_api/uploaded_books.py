@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import sqlite3
 from datetime import UTC, datetime
@@ -9,6 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from pypdf import PdfReader
+
+from smartread_api.chapter_summaries import (
+    ChapterSummaryGenerationError,
+    ChapterSummaryGenerator,
+    ChapterSummaryValidationError,
+    validate_chapter_summary_output,
+)
 
 
 class UploadedBookNotFoundError(Exception):
@@ -27,6 +35,10 @@ class ChapterBoundaryValidationError(Exception):
 
 
 class AcceptedChapterNotFoundError(Exception):
+    pass
+
+
+class ChapterSummaryNotFoundError(Exception):
     pass
 
 
@@ -435,6 +447,101 @@ class UploadedBookStore:
             "pages": [self._to_source_page(row) for row in page_rows],
         }
 
+    def generate_chapter_summary(
+        self,
+        book_id: int,
+        chapter_number: int,
+        generator: ChapterSummaryGenerator,
+    ) -> dict[str, Any]:
+        source = self.get_accepted_chapter_source_pages(book_id, chapter_number)
+        chapter = source["chapter"]
+        pages = source["pages"]
+
+        try:
+            generated_output = generator.generate_summary(chapter=chapter, pages=pages)
+            summary = validate_chapter_summary_output(generated_output, pages=pages)
+        except ChapterSummaryGenerationError as error:
+            return self._save_failed_chapter_summary(
+                book_id=book_id,
+                chapter_number=chapter_number,
+                chapter=chapter,
+                provider=getattr(generator, "provider", "unknown"),
+                model=getattr(generator, "model", "unknown"),
+                error_message=error.message,
+            )
+        except ChapterSummaryValidationError as error:
+            return self._save_failed_chapter_summary(
+                book_id=book_id,
+                chapter_number=chapter_number,
+                chapter=chapter,
+                provider=getattr(generator, "provider", "unknown"),
+                model=getattr(generator, "model", "unknown"),
+                error_message=error.message,
+            )
+
+        generated_at = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO chapter_summaries (
+                    book_id,
+                    chapter_number,
+                    generation_status,
+                    generation_error,
+                    provider,
+                    model,
+                    generated_at,
+                    summary_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(book_id, chapter_number)
+                DO UPDATE SET
+                    generation_status = excluded.generation_status,
+                    generation_error = excluded.generation_error,
+                    provider = excluded.provider,
+                    model = excluded.model,
+                    generated_at = excluded.generated_at,
+                    summary_json = excluded.summary_json
+                """,
+                (
+                    book_id,
+                    chapter_number,
+                    "generated",
+                    None,
+                    getattr(generator, "provider", "unknown"),
+                    getattr(generator, "model", "unknown"),
+                    generated_at,
+                    json.dumps(summary),
+                ),
+            )
+
+        return self.get_chapter_summary(book_id, chapter_number)
+
+    def get_chapter_summary(self, book_id: int, chapter_number: int) -> dict[str, Any]:
+        source = self.get_accepted_chapter_source_pages(book_id, chapter_number)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    book_id,
+                    chapter_number,
+                    generation_status,
+                    generation_error,
+                    provider,
+                    model,
+                    generated_at,
+                    summary_json
+                FROM chapter_summaries
+                WHERE book_id = ? AND chapter_number = ?
+                """,
+                (book_id, chapter_number),
+            ).fetchone()
+
+        if row is None:
+            raise ChapterSummaryNotFoundError
+
+        return self._to_chapter_summary(row, source["chapter"])
+
     def _save_pdf_metadata(
         self,
         *,
@@ -595,6 +702,23 @@ class UploadedBookStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chapter_summaries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    book_id INTEGER NOT NULL,
+                    chapter_number INTEGER NOT NULL,
+                    generation_status TEXT NOT NULL,
+                    generation_error TEXT,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    generated_at TEXT,
+                    summary_json TEXT,
+                    UNIQUE(book_id, chapter_number),
+                    FOREIGN KEY(book_id) REFERENCES uploaded_books(id)
+                )
+                """
+            )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)
@@ -668,6 +792,81 @@ class UploadedBookStore:
             "start_source_location": row["start_source_location"],
             "end_source_location": row["end_source_location"],
             "review_status": row["review_status"],
+        }
+
+    def _to_chapter_summary(
+        self,
+        row: sqlite3.Row,
+        chapter: dict[str, Any],
+    ) -> dict[str, Any]:
+        summary_json = row["summary_json"]
+        return {
+            "book_id": row["book_id"],
+            "chapter_number": row["chapter_number"],
+            "chapter": chapter,
+            "generation_status": row["generation_status"],
+            "generation_error": row["generation_error"],
+            "provider": row["provider"],
+            "model": row["model"],
+            "generated_at": row["generated_at"],
+            "summary": json.loads(summary_json) if summary_json else None,
+        }
+
+    def _save_failed_chapter_summary(
+        self,
+        *,
+        book_id: int,
+        chapter_number: int,
+        chapter: dict[str, Any],
+        provider: str,
+        model: str,
+        error_message: str,
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO chapter_summaries (
+                    book_id,
+                    chapter_number,
+                    generation_status,
+                    generation_error,
+                    provider,
+                    model,
+                    generated_at,
+                    summary_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(book_id, chapter_number)
+                DO UPDATE SET
+                    generation_status = excluded.generation_status,
+                    generation_error = excluded.generation_error,
+                    provider = excluded.provider,
+                    model = excluded.model,
+                    generated_at = excluded.generated_at,
+                    summary_json = excluded.summary_json
+                """,
+                (
+                    book_id,
+                    chapter_number,
+                    "failed",
+                    error_message,
+                    provider,
+                    model,
+                    None,
+                    None,
+                ),
+            )
+
+        return {
+            "book_id": book_id,
+            "chapter_number": chapter_number,
+            "chapter": chapter,
+            "generation_status": "failed",
+            "generation_error": error_message,
+            "provider": provider,
+            "model": model,
+            "generated_at": None,
+            "summary": None,
         }
 
     def _extract_pdf_pages(self, book_id: int, pdf_content: bytes) -> list[dict[str, Any]]:

@@ -7,6 +7,9 @@ try:
     from smartread_frontend.uploads import (
         detect_chapters_from_api,
         extract_pdf_text_from_api,
+        generate_chapter_summary_from_api,
+        get_chapter_boundaries_from_api,
+        get_chapter_summary_from_api,
         get_uploaded_books,
         save_chapter_boundaries_to_api,
         upload_pdf_to_api,
@@ -19,6 +22,9 @@ except ModuleNotFoundError as error:
     from uploads import (
         detect_chapters_from_api,
         extract_pdf_text_from_api,
+        generate_chapter_summary_from_api,
+        get_chapter_boundaries_from_api,
+        get_chapter_summary_from_api,
         get_uploaded_books,
         save_chapter_boundaries_to_api,
         upload_pdf_to_api,
@@ -141,7 +147,19 @@ def main() -> None:
 
     with center:
         st.markdown("## Chapter Lesson")
-        st.markdown("Summary, Core Concepts, Key Takeaways, Quiz, and Review will live here.")
+        summary_tab, concepts_tab, takeaways_tab, quiz_tab, review_tab = st.tabs(
+            ["Summary", "Core Concepts", "Key Takeaways", "Quiz", "Review"]
+        )
+        with summary_tab:
+            _render_summary_tab(api_url=api_url, books_result=books_result)
+        with concepts_tab:
+            st.markdown("Core Concepts will be generated in a later MVP slice.")
+        with takeaways_tab:
+            st.markdown("Key Takeaways will be generated in a later MVP slice.")
+        with quiz_tab:
+            st.markdown("Five quiz questions will be generated in a later MVP slice.")
+        with review_tab:
+            st.markdown("Missed-concept review will be generated in a later MVP slice.")
 
     with right:
         st.markdown("## Evidence")
@@ -226,11 +244,104 @@ def _render_chapter_boundary_review(
             st.success(review_result.message)
             st.markdown(review_result.message)
             st.markdown("Accepted chapter boundaries are saved for downstream lesson generation.")
+            st.session_state[f"accepted_chapters_{book_id}"] = review_result.chapters
         else:
             st.error(review_result.message)
             st.markdown(review_result.message)
             if review_result.retryable:
                 st.markdown("Adjust the boundaries and retry saving.")
+
+
+def _render_summary_tab(*, api_url: str, books_result: object | None) -> None:
+    accepted_chapters_by_book = _load_accepted_chapters_for_summary(
+        api_url=api_url,
+        books_result=books_result,
+    )
+    if not accepted_chapters_by_book:
+        st.markdown("No generated chapter summary yet.")
+        return
+
+    for book, chapters in accepted_chapters_by_book:
+        for chapter in chapters:
+            chapter_number = int(chapter["chapter_number"])
+            st.markdown(f"**{book['original_filename']} - Chapter {chapter_number}: {chapter['title']}**")
+            result_key = f"summary_result_{book['id']}_{chapter_number}"
+            if result_key not in st.session_state:
+                loaded_result = get_chapter_summary_from_api(
+                    api_url,
+                    book_id=int(book["id"]),
+                    chapter_number=chapter_number,
+                )
+                if loaded_result.success:
+                    st.session_state[result_key] = loaded_result
+
+            if st.button(
+                f"Generate summary: {chapter_number}. {chapter['title']}",
+                key=f"generate_summary_{book['id']}_{chapter_number}",
+            ):
+                with st.spinner("Generating cited summary..."):
+                    summary_result = generate_chapter_summary_from_api(
+                        api_url,
+                        book_id=int(book["id"]),
+                        chapter_number=chapter_number,
+                    )
+                st.session_state[result_key] = summary_result
+
+            if result_key in st.session_state:
+                _render_chapter_summary_result(st.session_state[result_key])
+
+
+def _load_accepted_chapters_for_summary(
+    *,
+    api_url: str,
+    books_result: object | None,
+) -> list[tuple[dict[str, object], list[dict[str, object]]]]:
+    if books_result is None or not getattr(books_result, "success", False):
+        return []
+
+    accepted_chapters_by_book = []
+    for book in books_result.books:
+        book_id = int(book["id"])
+        accepted_key = f"accepted_chapters_{book_id}"
+        chapters = st.session_state.get(accepted_key)
+        if chapters is None and book.get("chapter_review_status") == "accepted":
+            boundary_result = get_chapter_boundaries_from_api(api_url, book_id=book_id)
+            if boundary_result.success:
+                chapters = boundary_result.chapters
+                st.session_state[accepted_key] = chapters
+            else:
+                st.error(boundary_result.message)
+                if boundary_result.retryable:
+                    st.markdown("Retry loading accepted chapter boundaries after FastAPI recovers.")
+                chapters = []
+
+        if chapters:
+            accepted_chapters_by_book.append((book, chapters))
+
+    return accepted_chapters_by_book
+
+
+def _render_chapter_summary_result(result: object) -> None:
+    if not result.success:
+        st.error(result.message)
+        st.markdown(result.message)
+        if result.retryable:
+            st.markdown("Retry summary generation for this chapter.")
+        return
+
+    st.success(result.message)
+    st.markdown(result.message)
+    summary = result.summary or {}
+    central_argument = summary.get("central_argument", {})
+    if central_argument:
+        st.markdown(f"Central argument: {central_argument['claim']}")
+        st.markdown(f"Citations: {', '.join(central_argument['citation_ids'])}")
+
+    supporting_ideas = summary.get("supporting_ideas", [])
+    if supporting_ideas:
+        st.markdown("Supporting ideas")
+        for idea in supporting_ideas:
+            st.markdown(f"- {idea['claim']} ({', '.join(idea['citation_ids'])})")
 
 
 def _merge_first_two_chapters(chapters: list[dict[str, object]]) -> list[dict[str, object]]:
