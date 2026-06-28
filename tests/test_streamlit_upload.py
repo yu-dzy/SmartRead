@@ -12,11 +12,122 @@ from smartread_frontend.uploads import (
     CitationEvidenceResult,
     ConceptsTakeawaysResult,
     ExtractionResult,
+    QuizResult,
     UploadResult,
 )
 
 
 PDF_BYTES = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
+
+
+def _empty_quiz_result(
+    api_base_url: str,
+    *,
+    book_id: int,
+    chapter_number: int,
+) -> QuizResult:
+    return QuizResult(
+        success=False,
+        message="Quiz has not been generated yet.",
+        retryable=False,
+    )
+
+
+def _empty_summary_result(
+    api_base_url: str,
+    *,
+    book_id: int,
+    chapter_number: int,
+) -> ChapterSummaryResult:
+    return ChapterSummaryResult(
+        success=False,
+        message="Chapter Summary has not been generated yet.",
+        retryable=False,
+    )
+
+
+def _empty_concepts_result(
+    api_base_url: str,
+    *,
+    book_id: int,
+    chapter_number: int,
+) -> ConceptsTakeawaysResult:
+    return ConceptsTakeawaysResult(
+        success=False,
+        message="Core Concepts and Key Takeaways have not been generated yet.",
+        retryable=False,
+    )
+
+
+def _sample_quiz_content() -> dict[str, object]:
+    return {
+        "questions": [
+            {
+                "id": "q1",
+                "question_text": "What does protected attention reduce?",
+                "question_type": "multiple_choice",
+                "answer_options": ["Constant switching", "Long-term memory"],
+                "correct_answer": "Constant switching",
+                "explanation": "Protected attention reduces constant switching.",
+                "tested_concept": "Protected Attention",
+                "citation_id": "qc1",
+            },
+            {
+                "id": "q2",
+                "question_text": "True or false: retrieval cues help recall.",
+                "question_type": "true_false",
+                "answer_options": ["True", "False"],
+                "correct_answer": "True",
+                "explanation": "Retrieval cues help learners recall ideas.",
+                "tested_concept": "Retrieval Cues",
+                "citation_id": "qc2",
+            },
+            {
+                "id": "q3",
+                "question_text": "Which concept applies when a learner silences chat?",
+                "question_type": "scenario_application",
+                "answer_options": ["Protected Attention", "Retrieval Cues"],
+                "correct_answer": "Protected Attention",
+                "explanation": "Silencing chat protects attention.",
+                "tested_concept": "Protected Attention",
+                "citation_id": "qc1",
+            },
+            {
+                "id": "q4",
+                "question_text": "Which practice connects ideas to memory?",
+                "question_type": "multiple_choice",
+                "answer_options": ["Retrieval cues", "Ignoring feedback"],
+                "correct_answer": "Retrieval cues",
+                "explanation": "Retrieval cues connect practice to memory.",
+                "tested_concept": "Retrieval Cues",
+                "citation_id": "qc2",
+            },
+            {
+                "id": "q5",
+                "question_text": "What makes deliberate practice easier to repeat?",
+                "question_type": "multiple_choice",
+                "answer_options": ["Reducing context switching", "Removing citations"],
+                "correct_answer": "Reducing context switching",
+                "explanation": "Protected blocks reduce context switching.",
+                "tested_concept": "Protected Attention",
+                "citation_id": "qc1",
+            },
+        ],
+        "citations": [
+            {
+                "id": "qc1",
+                "source_location": "book:20:page:1",
+                "page_number": 1,
+                "source_excerpt": "Protected attention reduces constant switching.",
+            },
+            {
+                "id": "qc2",
+                "source_location": "book:20:page:2",
+                "page_number": 2,
+                "source_excerpt": "Retrieval cues help learners recall ideas.",
+            },
+        ],
+    }
 
 
 def test_streamlit_uploads_pdf_and_shows_uploaded_book(monkeypatch):
@@ -535,6 +646,7 @@ def test_streamlit_saves_reviewed_chapter_boundaries(monkeypatch):
         "get_concepts_takeaways_from_api",
         fake_get_concepts_takeaways_from_api,
     )
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", _empty_quiz_result)
 
     app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
     app = AppTest.from_file(str(app_path))
@@ -672,6 +784,8 @@ def test_streamlit_generates_selected_chapter_summary(monkeypatch):
         "get_chapter_summary_from_api",
         fake_get_chapter_summary_from_api,
     )
+    monkeypatch.setattr(uploads_module, "get_concepts_takeaways_from_api", _empty_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", _empty_quiz_result)
 
     app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
     app = AppTest.from_file(str(app_path))
@@ -784,6 +898,8 @@ def test_streamlit_shows_retryable_summary_generation_failure(monkeypatch):
         "get_chapter_summary_from_api",
         fake_get_chapter_summary_from_api,
     )
+    monkeypatch.setattr(uploads_module, "get_concepts_takeaways_from_api", _empty_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", _empty_quiz_result)
 
     app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
     app = AppTest.from_file(str(app_path))
@@ -884,6 +1000,8 @@ def test_streamlit_loads_persisted_chapter_summary(monkeypatch):
         "get_chapter_summary_from_api",
         fake_get_chapter_summary_from_api,
     )
+    monkeypatch.setattr(uploads_module, "get_concepts_takeaways_from_api", _empty_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", _empty_quiz_result)
 
     app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
     app = AppTest.from_file(str(app_path))
@@ -1011,6 +1129,8 @@ def test_streamlit_clicking_summary_citation_updates_evidence_panel(monkeypatch)
         "get_citation_evidence_from_api",
         fake_get_citation_evidence_from_api,
     )
+    monkeypatch.setattr(uploads_module, "get_concepts_takeaways_from_api", _empty_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", _empty_quiz_result)
 
     app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
     app = AppTest.from_file(str(app_path))
@@ -1150,6 +1270,8 @@ def test_streamlit_evidence_error_can_retry_same_citation(monkeypatch):
         "get_citation_evidence_from_api",
         fake_get_citation_evidence_from_api,
     )
+    monkeypatch.setattr(uploads_module, "get_concepts_takeaways_from_api", _empty_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", _empty_quiz_result)
 
     app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
     app = AppTest.from_file(str(app_path))
@@ -1292,6 +1414,8 @@ def test_streamlit_generates_core_concepts_and_key_takeaways(monkeypatch):
         "generate_concepts_takeaways_from_api",
         fake_generate_concepts_takeaways_from_api,
     )
+    monkeypatch.setattr(uploads_module, "get_chapter_summary_from_api", _empty_summary_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", _empty_quiz_result)
 
     app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
     app = AppTest.from_file(str(app_path))
@@ -1425,6 +1549,7 @@ def test_streamlit_shows_retryable_concepts_takeaways_failure(monkeypatch):
         "generate_concepts_takeaways_from_api",
         fake_generate_concepts_takeaways_from_api,
     )
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", _empty_quiz_result)
 
     app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
     app = AppTest.from_file(str(app_path))
@@ -1442,3 +1567,391 @@ def test_streamlit_shows_retryable_concepts_takeaways_failure(monkeypatch):
 
     assert "Source excerpts must support concept and takeaway claims." in page_text
     assert "Retry Core Concepts and Key Takeaways generation for this chapter." in page_text
+
+
+def test_streamlit_generates_five_quiz_questions_without_grading(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 20,
+            "original_filename": "quiz-tabs.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 20,
+            "chapter_number": 1,
+            "title": "Quiz Practice",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:20:page:1",
+            "end_source_location": "book:20:page:2",
+            "review_status": "accepted",
+        }
+    ]
+    generated: dict[str, object] = {}
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    def fake_get_chapter_summary_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> ChapterSummaryResult:
+        return ChapterSummaryResult(
+            success=False,
+            message="Chapter Summary has not been generated yet.",
+            retryable=False,
+        )
+
+    def fake_get_concepts_takeaways_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> ConceptsTakeawaysResult:
+        return ConceptsTakeawaysResult(
+            success=False,
+            message="Core Concepts and Key Takeaways have not been generated yet.",
+            retryable=False,
+        )
+
+    def fake_get_quiz_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> QuizResult:
+        return QuizResult(
+            success=False,
+            message="Quiz has not been generated yet.",
+            retryable=False,
+        )
+
+    def fake_generate_quiz_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> QuizResult:
+        generated["book_id"] = book_id
+        generated["chapter_number"] = chapter_number
+        return QuizResult(
+            success=True,
+            message="Quiz generated for Chapter 1: Quiz Practice.",
+            chapter=accepted_chapters[0],
+            generation_status="generated",
+            quiz={
+                "questions": [
+                    {
+                        "id": "q1",
+                        "question_text": (
+                            "What does protected attention reduce during deliberate practice?"
+                        ),
+                        "question_type": "multiple_choice",
+                        "answer_options": [
+                            "Constant switching",
+                            "Long-term memory",
+                            "Chapter boundaries",
+                        ],
+                        "correct_answer": "Constant switching",
+                        "explanation": "Protected attention reduces constant switching.",
+                        "tested_concept": "Protected Attention",
+                        "citation_id": "qc1",
+                    },
+                    {
+                        "id": "q2",
+                        "question_text": "True or false: retrieval cues help recall.",
+                        "question_type": "true_false",
+                        "answer_options": ["True", "False"],
+                        "correct_answer": "True",
+                        "explanation": "Retrieval cues help learners recall ideas.",
+                        "tested_concept": "Retrieval Cues",
+                        "citation_id": "qc2",
+                    },
+                    {
+                        "id": "q3",
+                        "question_text": "Which concept applies when a learner silences chat?",
+                        "question_type": "scenario_application",
+                        "answer_options": ["Protected Attention", "Retrieval Cues"],
+                        "correct_answer": "Protected Attention",
+                        "explanation": "Silencing chat protects attention.",
+                        "tested_concept": "Protected Attention",
+                        "citation_id": "qc1",
+                    },
+                    {
+                        "id": "q4",
+                        "question_text": "Which practice connects ideas to memory?",
+                        "question_type": "multiple_choice",
+                        "answer_options": ["Retrieval cues", "Ignoring feedback"],
+                        "correct_answer": "Retrieval cues",
+                        "explanation": "Retrieval cues connect practice to memory.",
+                        "tested_concept": "Retrieval Cues",
+                        "citation_id": "qc2",
+                    },
+                    {
+                        "id": "q5",
+                        "question_text": "What makes deliberate practice easier to repeat?",
+                        "question_type": "multiple_choice",
+                        "answer_options": ["Reducing context switching", "Removing citations"],
+                        "correct_answer": "Reducing context switching",
+                        "explanation": "Protected blocks reduce context switching.",
+                        "tested_concept": "Protected Attention",
+                        "citation_id": "qc1",
+                    },
+                ],
+                "citations": [
+                    {
+                        "id": "qc1",
+                        "source_location": "book:20:page:1",
+                        "page_number": 1,
+                        "source_excerpt": "Protected attention reduces constant switching.",
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_summary_from_api",
+        fake_get_chapter_summary_from_api,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "get_concepts_takeaways_from_api",
+        fake_get_concepts_takeaways_from_api,
+    )
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", fake_get_quiz_from_api)
+    monkeypatch.setattr(uploads_module, "generate_quiz_from_api", fake_generate_quiz_from_api)
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    generate_button = next(
+        button for button in app.button if button.label == "Generate quiz: 1. Quiz Practice"
+    )
+    generate_button.click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert generated == {"book_id": 20, "chapter_number": 1}
+    assert "Quiz generated for Chapter 1: Quiz Practice." in page_text
+    assert "What does protected attention reduce during deliberate practice?" in page_text
+    assert "Constant switching" in page_text
+    assert "Protected Attention" in page_text
+    assert "Correct answer:" not in page_text
+
+
+def test_streamlit_loads_persisted_quiz_questions(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 21,
+            "original_filename": "persisted-quiz.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 21,
+            "chapter_number": 1,
+            "title": "Persisted Quiz",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:21:page:1",
+            "end_source_location": "book:21:page:2",
+            "review_status": "accepted",
+        }
+    ]
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    def fake_get_quiz_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> QuizResult:
+        return QuizResult(
+            success=True,
+            message="Quiz loaded for Chapter 1: Persisted Quiz.",
+            chapter=accepted_chapters[0],
+            generation_status="generated",
+            quiz=_sample_quiz_content(),
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(uploads_module, "get_chapter_summary_from_api", _empty_summary_result)
+    monkeypatch.setattr(uploads_module, "get_concepts_takeaways_from_api", _empty_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", fake_get_quiz_from_api)
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert "Quiz loaded for Chapter 1: Persisted Quiz." in page_text
+    assert "What does protected attention reduce?" in page_text
+    assert "Tested concept: Protected Attention" in page_text
+
+
+def test_streamlit_shows_retryable_quiz_generation_failure(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 22,
+            "original_filename": "failed-quiz.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 22,
+            "chapter_number": 1,
+            "title": "Failed Quiz",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:22:page:1",
+            "end_source_location": "book:22:page:2",
+            "review_status": "accepted",
+        }
+    ]
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    def fake_generate_quiz_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> QuizResult:
+        return QuizResult(
+            success=False,
+            message="Quiz questions need one clear correct answer.",
+            chapter=accepted_chapters[0],
+            generation_status="failed",
+            retryable=True,
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(uploads_module, "get_chapter_summary_from_api", _empty_summary_result)
+    monkeypatch.setattr(uploads_module, "get_concepts_takeaways_from_api", _empty_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", _empty_quiz_result)
+    monkeypatch.setattr(uploads_module, "generate_quiz_from_api", fake_generate_quiz_from_api)
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    generate_button = next(
+        button for button in app.button if button.label == "Generate quiz: 1. Failed Quiz"
+    )
+    generate_button.click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert "Quiz questions need one clear correct answer." in page_text
+    assert "Retry quiz generation for this chapter." in page_text

@@ -2,7 +2,7 @@
 
 SmartRead is a private learning system for cited chapter lessons, active recall, and targeted review.
 
-## Issue #8 Core Concepts And Key Takeaways Slice
+## Issue #9 Grounded Quiz Questions Slice
 
 Start the FastAPI backend:
 
@@ -35,7 +35,9 @@ Persisted Summary citations render as clickable controls. Clicking a citation as
 
 Use the Core Concepts tab to generate cited Core Concepts and grounded Key Takeaways for the same accepted chapter pages. FastAPI validates the structured Pydantic output, rejects invalid citations, duplicate or generic concepts, unsupported claims, and malformed model responses, then persists generation status, content, citations, and errors. Persisted Concepts and Takeaways reload after restart and their citation controls update the same focused Evidence panel.
 
-Real Summary, Core Concepts, and Key Takeaways generation use OpenAI by default with model `gpt-5.5`. Set the API key before starting FastAPI:
+Use the Quiz tab to generate exactly five grounded quiz questions for the selected accepted chapter. FastAPI uses only the accepted chapter pages and generated Core Concepts, validates structured Pydantic output, rejects malformed quiz output, invalid citations, duplicate questions, ambiguous answers, unsupported questions, and trivia-only prompts, then persists generation status, questions, citations, and errors. Persisted quizzes reload after restart and citation controls resolve focused evidence excerpts.
+
+Real Summary, Core Concepts, Key Takeaways, and Quiz generation use OpenAI by default with model `gpt-5.5`. Set the API key before starting FastAPI:
 
 ```powershell
 $env:OPENAI_API_KEY = "your-api-key"
@@ -47,7 +49,7 @@ To override the default model:
 $env:SMARTREAD_OPENAI_MODEL = "gpt-5.5"
 ```
 
-Quizzes, missed concepts, and review queues are not implemented yet.
+Quiz answer grading, missed concepts, and review queues are not implemented yet.
 
 By default, metadata is saved at `.smartread/smartread.db`. To use another database file:
 

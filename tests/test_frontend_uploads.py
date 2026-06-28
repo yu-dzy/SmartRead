@@ -5,10 +5,12 @@ from smartread_frontend.uploads import (
     extract_pdf_text_from_api,
     generate_chapter_summary_from_api,
     generate_concepts_takeaways_from_api,
+    generate_quiz_from_api,
     get_chapter_boundaries_from_api,
     get_chapter_summary_from_api,
     get_citation_evidence_from_api,
     get_concepts_takeaways_from_api,
+    get_quiz_from_api,
     get_uploaded_books,
     save_chapter_boundaries_to_api,
     upload_pdf_to_api,
@@ -679,3 +681,144 @@ def test_get_concepts_takeaways_from_api_loads_persisted_content():
     assert result.message == "Core Concepts and Key Takeaways loaded for Chapter 1: Deep Focus."
     assert result.content is not None
     assert result.content["key_takeaways"][0]["text"] == "Protect attention before difficult practice."
+
+
+def test_generate_quiz_from_api_reports_five_saved_questions():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert str(request.url) == "http://api.test/books/7/chapter-boundaries/1/quiz"
+        return httpx.Response(200, json=_quiz_payload())
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = generate_quiz_from_api(
+        "http://api.test",
+        book_id=7,
+        chapter_number=1,
+        client=client,
+    )
+
+    assert result.success is True
+    assert result.message == "Quiz generated for Chapter 1: Deep Focus."
+    assert result.quiz is not None
+    assert len(result.quiz["questions"]) == 5
+    assert result.quiz["questions"][0]["tested_concept"] == "Protected Attention"
+
+
+def test_get_quiz_from_api_loads_saved_questions():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert str(request.url) == "http://api.test/books/7/chapter-boundaries/1/quiz"
+        return httpx.Response(200, json=_quiz_payload())
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = get_quiz_from_api(
+        "http://api.test",
+        book_id=7,
+        chapter_number=1,
+        client=client,
+    )
+
+    assert result.success is True
+    assert result.message == "Quiz loaded for Chapter 1: Deep Focus."
+    assert result.quiz is not None
+    assert result.quiz["questions"][0]["question_text"] == (
+        "What does protected attention reduce during deliberate practice?"
+    )
+
+
+def _quiz_payload() -> dict[str, object]:
+    return {
+        "book_id": 7,
+        "chapter_number": 1,
+        "chapter": {
+            "book_id": 7,
+            "chapter_number": 1,
+            "title": "Deep Focus",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:7:page:1",
+            "end_source_location": "book:7:page:2",
+            "review_status": "accepted",
+        },
+        "generation_status": "generated",
+        "generation_error": None,
+        "provider": "openai",
+        "model": "gpt-5.5",
+        "generated_at": "2026-06-28T07:00:00Z",
+        "quiz": {
+            "questions": [
+                {
+                    "id": "q1",
+                    "question_text": (
+                        "What does protected attention reduce during deliberate practice?"
+                    ),
+                    "question_type": "multiple_choice",
+                    "answer_options": [
+                        "Constant switching",
+                        "Long-term memory",
+                        "Chapter boundaries",
+                    ],
+                    "correct_answer": "Constant switching",
+                    "explanation": "Protected attention reduces constant switching.",
+                    "tested_concept": "Protected Attention",
+                    "citation_id": "qc1",
+                },
+                {
+                    "id": "q2",
+                    "question_text": "True or false: retrieval cues help recall.",
+                    "question_type": "true_false",
+                    "answer_options": ["True", "False"],
+                    "correct_answer": "True",
+                    "explanation": "Retrieval cues help learners recall ideas.",
+                    "tested_concept": "Retrieval Cues",
+                    "citation_id": "qc2",
+                },
+                {
+                    "id": "q3",
+                    "question_text": "Which concept applies when a learner silences chat?",
+                    "question_type": "scenario_application",
+                    "answer_options": ["Protected Attention", "Retrieval Cues"],
+                    "correct_answer": "Protected Attention",
+                    "explanation": "Silencing chat protects attention.",
+                    "tested_concept": "Protected Attention",
+                    "citation_id": "qc1",
+                },
+                {
+                    "id": "q4",
+                    "question_text": "Which practice connects ideas to memory?",
+                    "question_type": "multiple_choice",
+                    "answer_options": ["Retrieval cues", "Ignoring feedback"],
+                    "correct_answer": "Retrieval cues",
+                    "explanation": "Retrieval cues connect practice to memory.",
+                    "tested_concept": "Retrieval Cues",
+                    "citation_id": "qc2",
+                },
+                {
+                    "id": "q5",
+                    "question_text": "What makes deliberate practice easier to repeat?",
+                    "question_type": "multiple_choice",
+                    "answer_options": ["Reducing context switching", "Removing citations"],
+                    "correct_answer": "Reducing context switching",
+                    "explanation": "Protected blocks reduce context switching.",
+                    "tested_concept": "Protected Attention",
+                    "citation_id": "qc1",
+                },
+            ],
+            "citations": [
+                {
+                    "id": "qc1",
+                    "source_location": "book:7:page:1",
+                    "page_number": 1,
+                    "source_excerpt": "Protected attention reduces constant switching.",
+                },
+                {
+                    "id": "qc2",
+                    "source_location": "book:7:page:2",
+                    "page_number": 2,
+                    "source_excerpt": "Retrieval cues help learners recall ideas.",
+                },
+            ],
+        },
+    }
