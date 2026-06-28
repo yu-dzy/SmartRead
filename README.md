@@ -2,7 +2,7 @@
 
 SmartRead is a private learning system for cited chapter lessons, active recall, and targeted review.
 
-## Issue #4 Chapter Detection Slice
+## Issue #5 Chapter Boundary Review Slice
 
 Start the FastAPI backend:
 
@@ -27,7 +27,9 @@ After upload, use **Extract text** on an Uploaded Book. FastAPI extracts text pa
 
 After extraction, use **Detect chapters**. FastAPI detects provisional chapters from PDF outline entries first, then heading patterns in the extracted page text. Detected Chapters are stored with titles, start and end page boundaries, source locations, confidence, and detection source. Streamlit shows the provisional Book Map, low-confidence warnings, and a clear empty state when no chapters are detected.
 
-Chapter editing and chapter lesson generation are not implemented yet.
+After detection, review the Book Map in Streamlit. You can rename chapters, adjust start/end pages, merge the first two adjacent sections, split the first section when it spans more than one page, and save accepted boundaries. FastAPI validates ranges, rejects overlaps, persists accepted chapter boundaries, and exposes accepted source pages for downstream lesson generation.
+
+Chapter lesson generation, summaries, AI features, and quizzes are not implemented yet.
 
 By default, metadata is saved at `.smartread/smartread.db`. To use another database file:
 

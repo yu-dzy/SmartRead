@@ -4,6 +4,7 @@ from smartread_frontend.uploads import (
     detect_chapters_from_api,
     extract_pdf_text_from_api,
     get_uploaded_books,
+    save_chapter_boundaries_to_api,
     upload_pdf_to_api,
 )
 
@@ -244,3 +245,79 @@ def test_detect_chapters_from_api_reports_book_map_summary():
     assert result.message == "Detected 2 chapters with high confidence."
     assert result.summary["chapter_count"] == 2
     assert result.chapters[0]["title"] == "Getting Started"
+
+
+def test_save_chapter_boundaries_to_api_reports_accepted_boundaries():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PUT"
+        assert str(request.url) == "http://api.test/books/7/chapter-boundaries"
+        return httpx.Response(
+            200,
+            json={
+                "book": {
+                    "id": 7,
+                    "original_filename": "learning.pdf",
+                    "content_type": "application/pdf",
+                    "file_size": 100,
+                    "uploaded_at": "2026-06-27T12:00:00Z",
+                    "upload_status": "uploaded",
+                    "processing_status": "extracted",
+                    "error_message": None,
+                    "chapter_detection_status": "detected",
+                    "chapter_detection_confidence": "high",
+                    "chapter_detection_message": None,
+                    "chapter_review_status": "accepted",
+                },
+                "chapters": [
+                    {
+                        "book_id": 7,
+                        "chapter_number": 1,
+                        "title": "Deep Focus",
+                        "start_page": 1,
+                        "end_page": 2,
+                        "start_source_location": "book:7:page:1",
+                        "end_source_location": "book:7:page:2",
+                        "review_status": "accepted",
+                    }
+                ],
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = save_chapter_boundaries_to_api(
+        "http://api.test",
+        book_id=7,
+        chapters=[
+            {"chapter_number": 1, "title": "Deep Focus", "start_page": 1, "end_page": 2},
+        ],
+        client=client,
+    )
+
+    assert result.success is True
+    assert result.message == "Accepted 1 reviewed chapter boundary."
+    assert result.chapters[0]["title"] == "Deep Focus"
+
+
+def test_save_chapter_boundaries_to_api_reports_retryable_validation_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            422,
+            json={"detail": "Accepted chapter boundaries cannot overlap."},
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = save_chapter_boundaries_to_api(
+        "http://api.test",
+        book_id=7,
+        chapters=[
+            {"chapter_number": 1, "title": "Focus", "start_page": 1, "end_page": 2},
+            {"chapter_number": 2, "title": "Recall", "start_page": 2, "end_page": 2},
+        ],
+        client=client,
+    )
+
+    assert result.success is False
+    assert result.message == "Accepted chapter boundaries cannot overlap."
+    assert result.retryable is True

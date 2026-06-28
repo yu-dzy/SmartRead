@@ -5,6 +5,7 @@ from streamlit.testing.v1 import AppTest
 from smartread_frontend.health import ApiStatus
 from smartread_frontend.uploads import (
     BookListResult,
+    ChapterBoundaryReviewResult,
     ChapterDetectionResult,
     ExtractionResult,
     UploadResult,
@@ -405,3 +406,114 @@ def test_streamlit_shows_empty_state_when_no_chapters_are_detected(monkeypatch):
     assert "No chapters could be detected." in page_text
     assert "Manual chapter review will be required before lessons." in page_text
     assert "Chapter lesson generation remains unavailable until boundaries are reviewed." in page_text
+
+
+def test_streamlit_saves_reviewed_chapter_boundaries(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 12,
+            "original_filename": "review.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-27T12:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "not_started",
+        }
+    ]
+    detected_chapters = [
+        {
+            "book_id": 12,
+            "chapter_number": 1,
+            "title": "Focus",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:12:page:1",
+            "end_source_location": "book:12:page:2",
+            "confidence": "high",
+            "detection_source": "heading_pattern",
+        }
+    ]
+    saved_payload: dict[str, object] = {}
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_detect_chapters_from_api(api_base_url: str, *, book_id: int) -> ChapterDetectionResult:
+        return ChapterDetectionResult(
+            success=True,
+            message="Detected 1 chapters with high confidence.",
+            summary={"chapter_count": 1, "confidence": "high", "warning": None},
+            chapters=detected_chapters,
+            book=uploaded_books[0],
+        )
+
+    def fake_save_chapter_boundaries_to_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapters: list[dict[str, object]],
+    ) -> ChapterBoundaryReviewResult:
+        saved_payload["book_id"] = book_id
+        saved_payload["chapters"] = chapters
+        uploaded_books[0]["chapter_review_status"] = "accepted"
+        return ChapterBoundaryReviewResult(
+            success=True,
+            message="Accepted 1 reviewed chapter boundary.",
+            chapters=[
+                {
+                    "book_id": book_id,
+                    "chapter_number": 1,
+                    "title": "Renamed Focus",
+                    "start_page": 1,
+                    "end_page": 1,
+                    "start_source_location": "book:12:page:1",
+                    "end_source_location": "book:12:page:1",
+                    "review_status": "accepted",
+                }
+            ],
+            book=uploaded_books[0],
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(uploads_module, "detect_chapters_from_api", fake_detect_chapters_from_api)
+    monkeypatch.setattr(
+        uploads_module,
+        "save_chapter_boundaries_to_api",
+        fake_save_chapter_boundaries_to_api,
+    )
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    app.button[2].click()
+    app.run(timeout=5)
+    app.text_input[0].set_value("Renamed Focus")
+    app.number_input[1].set_value(1)
+    app.button[5].click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert saved_payload["book_id"] == 12
+    assert saved_payload["chapters"] == [
+        {"chapter_number": 1, "title": "Renamed Focus", "start_page": 1, "end_page": 1}
+    ]
+    assert "Accepted 1 reviewed chapter boundary." in page_text
+    assert "Accepted chapter boundaries are saved for downstream lesson generation." in page_text
