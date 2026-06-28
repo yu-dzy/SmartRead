@@ -17,6 +17,12 @@ from smartread_api.chapter_concepts import (
     ConceptsTakeawaysValidationError,
     validate_concepts_takeaways_output,
 )
+from smartread_api.chapter_quizzes import (
+    ChapterQuizGenerationError,
+    ChapterQuizGenerator,
+    ChapterQuizValidationError,
+    validate_quiz_output,
+)
 from smartread_api.chapter_summaries import (
     ChapterSummaryGenerationError,
     ChapterSummaryGenerator,
@@ -49,6 +55,10 @@ class ChapterSummaryNotFoundError(Exception):
 
 
 class ConceptsTakeawaysNotFoundError(Exception):
+    pass
+
+
+class ChapterQuizNotFoundError(Exception):
     pass
 
 
@@ -575,6 +585,12 @@ class UploadedBookStore:
         except ConceptsTakeawaysNotFoundError:
             pass
 
+        try:
+            quiz_record = self.get_chapter_quiz(book_id, chapter_number)
+            generated_content.append(quiz_record["quiz"] or {})
+        except ChapterQuizNotFoundError:
+            pass
+
         if not generated_content:
             raise ChapterSummaryNotFoundError
 
@@ -697,6 +713,115 @@ class UploadedBookStore:
             raise ConceptsTakeawaysNotFoundError
 
         return self._to_chapter_concepts_takeaways(row, source["chapter"])
+
+    def generate_chapter_quiz(
+        self,
+        book_id: int,
+        chapter_number: int,
+        generator: ChapterQuizGenerator,
+    ) -> dict[str, Any]:
+        source = self.get_accepted_chapter_source_pages(book_id, chapter_number)
+        chapter = source["chapter"]
+        pages = source["pages"]
+        concepts_record = self.get_chapter_concepts_takeaways(book_id, chapter_number)
+        core_concepts = (concepts_record["content"] or {}).get("core_concepts", [])
+
+        try:
+            generated_output = generator.generate_quiz(
+                chapter=chapter,
+                pages=pages,
+                core_concepts=core_concepts,
+            )
+            quiz = validate_quiz_output(
+                generated_output,
+                pages=pages,
+                core_concepts=core_concepts,
+            )
+        except ChapterQuizGenerationError as error:
+            return self._save_failed_chapter_quiz(
+                book_id=book_id,
+                chapter_number=chapter_number,
+                chapter=chapter,
+                provider=getattr(generator, "provider", "unknown"),
+                model=getattr(generator, "model", "unknown"),
+                error_message=error.message,
+            )
+        except ChapterQuizValidationError as error:
+            return self._save_failed_chapter_quiz(
+                book_id=book_id,
+                chapter_number=chapter_number,
+                chapter=chapter,
+                provider=getattr(generator, "provider", "unknown"),
+                model=getattr(generator, "model", "unknown"),
+                error_message=error.message,
+            )
+
+        generated_at = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO chapter_quizzes (
+                    book_id,
+                    chapter_number,
+                    generation_status,
+                    generation_error,
+                    provider,
+                    model,
+                    generated_at,
+                    quiz_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(book_id, chapter_number)
+                DO UPDATE SET
+                    generation_status = excluded.generation_status,
+                    generation_error = excluded.generation_error,
+                    provider = excluded.provider,
+                    model = excluded.model,
+                    generated_at = excluded.generated_at,
+                    quiz_json = excluded.quiz_json
+                """,
+                (
+                    book_id,
+                    chapter_number,
+                    "generated",
+                    None,
+                    getattr(generator, "provider", "unknown"),
+                    getattr(generator, "model", "unknown"),
+                    generated_at,
+                    json.dumps(quiz),
+                ),
+            )
+
+        return self.get_chapter_quiz(book_id, chapter_number)
+
+    def get_chapter_quiz(
+        self,
+        book_id: int,
+        chapter_number: int,
+    ) -> dict[str, Any]:
+        source = self.get_accepted_chapter_source_pages(book_id, chapter_number)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    book_id,
+                    chapter_number,
+                    generation_status,
+                    generation_error,
+                    provider,
+                    model,
+                    generated_at,
+                    quiz_json
+                FROM chapter_quizzes
+                WHERE book_id = ? AND chapter_number = ?
+                """,
+                (book_id, chapter_number),
+            ).fetchone()
+
+        if row is None:
+            raise ChapterQuizNotFoundError
+
+        return self._to_chapter_quiz(row, source["chapter"])
 
     def _save_pdf_metadata(
         self,
@@ -892,6 +1017,23 @@ class UploadedBookStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chapter_quizzes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    book_id INTEGER NOT NULL,
+                    chapter_number INTEGER NOT NULL,
+                    generation_status TEXT NOT NULL,
+                    generation_error TEXT,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    generated_at TEXT,
+                    quiz_json TEXT,
+                    UNIQUE(book_id, chapter_number),
+                    FOREIGN KEY(book_id) REFERENCES uploaded_books(id)
+                )
+                """
+            )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)
@@ -1001,6 +1143,24 @@ class UploadedBookStore:
             "model": row["model"],
             "generated_at": row["generated_at"],
             "content": json.loads(content_json) if content_json else None,
+        }
+
+    def _to_chapter_quiz(
+        self,
+        row: sqlite3.Row,
+        chapter: dict[str, Any],
+    ) -> dict[str, Any]:
+        quiz_json = row["quiz_json"]
+        return {
+            "book_id": row["book_id"],
+            "chapter_number": row["chapter_number"],
+            "chapter": chapter,
+            "generation_status": row["generation_status"],
+            "generation_error": row["generation_error"],
+            "provider": row["provider"],
+            "model": row["model"],
+            "generated_at": row["generated_at"],
+            "quiz": json.loads(quiz_json) if quiz_json else None,
         }
 
     def _save_failed_chapter_summary(
@@ -1115,6 +1275,63 @@ class UploadedBookStore:
             "model": model,
             "generated_at": None,
             "content": None,
+        }
+
+    def _save_failed_chapter_quiz(
+        self,
+        *,
+        book_id: int,
+        chapter_number: int,
+        chapter: dict[str, Any],
+        provider: str,
+        model: str,
+        error_message: str,
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO chapter_quizzes (
+                    book_id,
+                    chapter_number,
+                    generation_status,
+                    generation_error,
+                    provider,
+                    model,
+                    generated_at,
+                    quiz_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(book_id, chapter_number)
+                DO UPDATE SET
+                    generation_status = excluded.generation_status,
+                    generation_error = excluded.generation_error,
+                    provider = excluded.provider,
+                    model = excluded.model,
+                    generated_at = excluded.generated_at,
+                    quiz_json = excluded.quiz_json
+                """,
+                (
+                    book_id,
+                    chapter_number,
+                    "failed",
+                    error_message,
+                    provider,
+                    model,
+                    None,
+                    None,
+                ),
+            )
+
+        return {
+            "book_id": book_id,
+            "chapter_number": chapter_number,
+            "chapter": chapter,
+            "generation_status": "failed",
+            "generation_error": error_message,
+            "provider": provider,
+            "model": model,
+            "generated_at": None,
+            "quiz": None,
         }
 
     def _resolve_citation_evidence_from_content(

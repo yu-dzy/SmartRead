@@ -77,6 +77,16 @@ class ConceptsTakeawaysResult:
 
 
 @dataclass(frozen=True)
+class QuizResult:
+    success: bool
+    message: str
+    quiz: dict[str, Any] | None = None
+    chapter: dict[str, Any] | None = None
+    generation_status: str | None = None
+    retryable: bool = False
+
+
+@dataclass(frozen=True)
 class CitationEvidenceResult:
     success: bool
     message: str
@@ -456,6 +466,95 @@ def get_concepts_takeaways_from_api(
         )
 
 
+def generate_quiz_from_api(
+    api_base_url: str,
+    *,
+    book_id: int,
+    chapter_number: int,
+    client: httpx.Client | None = None,
+) -> QuizResult:
+    http_client = client or httpx.Client(timeout=60.0)
+    try:
+        response = http_client.post(
+            f"{api_base_url.rstrip('/')}/books/{book_id}/chapter-boundaries/"
+            f"{chapter_number}/quiz"
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            chapter = payload["chapter"]
+            return QuizResult(
+                success=True,
+                message=_format_quiz_generation_message(chapter),
+                quiz=payload["quiz"],
+                chapter=chapter,
+                generation_status=payload["generation_status"],
+            )
+
+        detail = response.json().get("detail", {})
+        if isinstance(detail, dict):
+            failed = detail.get("quiz") or {}
+            return QuizResult(
+                success=False,
+                message=detail.get("message", "Quiz generation failed. Retry this chapter."),
+                quiz=failed.get("quiz"),
+                chapter=failed.get("chapter"),
+                generation_status=failed.get("generation_status"),
+                retryable=bool(detail.get("retryable", True)),
+            )
+        if isinstance(detail, str):
+            return QuizResult(success=False, message=detail, retryable=True)
+
+        return QuizResult(
+            success=False,
+            message="Quiz generation failed. Retry this chapter.",
+            retryable=True,
+        )
+    except httpx.HTTPError:
+        return QuizResult(
+            success=False,
+            message="Quiz generation failed. Check the FastAPI backend, then try again.",
+            retryable=True,
+        )
+
+
+def get_quiz_from_api(
+    api_base_url: str,
+    *,
+    book_id: int,
+    chapter_number: int,
+    client: httpx.Client | None = None,
+) -> QuizResult:
+    http_client = client or httpx.Client(timeout=10.0)
+    try:
+        response = http_client.get(
+            f"{api_base_url.rstrip('/')}/books/{book_id}/chapter-boundaries/"
+            f"{chapter_number}/quiz"
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            chapter = payload["chapter"]
+            return QuizResult(
+                success=True,
+                message=_format_quiz_loaded_message(chapter),
+                quiz=payload["quiz"],
+                chapter=chapter,
+                generation_status=payload["generation_status"],
+            )
+
+        detail = response.json().get("detail", {})
+        return QuizResult(
+            success=False,
+            message=detail if isinstance(detail, str) else "Quiz could not be loaded.",
+            retryable=response.status_code != 404,
+        )
+    except httpx.HTTPError:
+        return QuizResult(
+            success=False,
+            message="Quiz could not be loaded. Check the FastAPI backend, then try again.",
+            retryable=True,
+        )
+
+
 def get_citation_evidence_from_api(
     api_base_url: str,
     *,
@@ -587,3 +686,11 @@ def _format_concepts_loaded_message(chapter: dict[str, Any]) -> str:
         "Core Concepts and Key Takeaways loaded for "
         f"Chapter {chapter['chapter_number']}: {chapter['title']}."
     )
+
+
+def _format_quiz_generation_message(chapter: dict[str, Any]) -> str:
+    return f"Quiz generated for Chapter {chapter['chapter_number']}: {chapter['title']}."
+
+
+def _format_quiz_loaded_message(chapter: dict[str, Any]) -> str:
+    return f"Quiz loaded for Chapter {chapter['chapter_number']}: {chapter['title']}."

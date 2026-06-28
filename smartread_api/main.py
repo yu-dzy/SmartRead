@@ -4,10 +4,12 @@ from pathlib import Path
 from fastapi import FastAPI, File, HTTPException, UploadFile
 
 from smartread_api.chapter_concepts import OpenAIConceptsTakeawaysGenerator
+from smartread_api.chapter_quizzes import OpenAIChapterQuizGenerator
 from smartread_api.chapter_summaries import OpenAIChapterSummaryGenerator
 from smartread_api.uploaded_books import (
     AcceptedChapterNotFoundError,
     ChapterBoundaryValidationError,
+    ChapterQuizNotFoundError,
     ChapterSummaryNotFoundError,
     ConceptsTakeawaysNotFoundError,
     PdfExtractionError,
@@ -22,6 +24,7 @@ def create_app(
     database_path: str | Path | None = None,
     summary_generator: object | None = None,
     concepts_generator: object | None = None,
+    quiz_generator: object | None = None,
 ) -> FastAPI:
     app = FastAPI(title="SmartRead API")
     store = UploadedBookStore(database_path or _default_database_path())
@@ -29,6 +32,7 @@ def create_app(
     concepts_takeaways_generator = (
         concepts_generator or OpenAIConceptsTakeawaysGenerator.from_env()
     )
+    chapter_quiz_generator = quiz_generator or OpenAIChapterQuizGenerator.from_env()
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -250,6 +254,52 @@ def create_app(
             raise HTTPException(
                 status_code=404,
                 detail="Core Concepts and Key Takeaways have not been generated yet.",
+            ) from None
+
+    @app.post("/books/{book_id}/chapter-boundaries/{chapter_number}/quiz")
+    def generate_chapter_quiz(book_id: int, chapter_number: int) -> dict[str, object]:
+        try:
+            result = store.generate_chapter_quiz(
+                book_id,
+                chapter_number,
+                chapter_quiz_generator,
+            )
+        except AcceptedChapterNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="Accepted chapter boundary was not found.",
+            ) from None
+        except ConceptsTakeawaysNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="Core Concepts and Key Takeaways must be generated before Quiz.",
+            ) from None
+
+        if result["generation_status"] == "failed":
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": result["generation_error"],
+                    "retryable": True,
+                    "quiz": result,
+                },
+            )
+
+        return result
+
+    @app.get("/books/{book_id}/chapter-boundaries/{chapter_number}/quiz")
+    def get_chapter_quiz(book_id: int, chapter_number: int) -> dict[str, object]:
+        try:
+            return store.get_chapter_quiz(book_id, chapter_number)
+        except AcceptedChapterNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="Accepted chapter boundary was not found.",
+            ) from None
+        except ChapterQuizNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="Quiz has not been generated yet.",
             ) from None
 
     return app
