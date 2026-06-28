@@ -542,6 +542,65 @@ class UploadedBookStore:
 
         return self._to_chapter_summary(row, source["chapter"])
 
+    def get_chapter_summary_citation_evidence(
+        self,
+        book_id: int,
+        chapter_number: int,
+        citation_id: str,
+    ) -> dict[str, Any]:
+        summary_record = self.get_chapter_summary(book_id, chapter_number)
+        current_source = self.get_accepted_chapter_source_pages(book_id, chapter_number)
+        current_pages_by_location = {
+            page["source_location"]: page for page in current_source["pages"]
+        }
+        summary = summary_record["summary"] or {}
+        for citation in summary.get("citations", []):
+            if citation.get("id") == citation_id:
+                source_location = citation["source_location"]
+                page_number = citation["page_number"]
+                current_page = current_pages_by_location.get(source_location)
+                if current_page is None or current_page["page_number"] != page_number:
+                    return self._build_unverified_citation_evidence(
+                        book_id=book_id,
+                        chapter_number=chapter_number,
+                        citation_id=citation_id,
+                        message=(
+                            f"Citation {citation_id} no longer points inside "
+                            "the accepted chapter boundary."
+                        ),
+                        source_location=source_location,
+                        page_number=page_number,
+                    )
+
+                source_excerpt = citation.get("source_excerpt")
+                if not source_excerpt:
+                    return self._build_unverified_citation_evidence(
+                        book_id=book_id,
+                        chapter_number=chapter_number,
+                        citation_id=citation_id,
+                        message=f"Citation {citation_id} is missing a source excerpt.",
+                        source_location=source_location,
+                        page_number=page_number,
+                    )
+
+                return {
+                    "book_id": book_id,
+                    "chapter_number": chapter_number,
+                    "citation_id": citation_id,
+                    "verification_status": "verified",
+                    "message": f"Citation {citation_id} is verified.",
+                    "source_location": source_location,
+                    "page_number": page_number,
+                    "source_excerpt": source_excerpt,
+                }
+
+        return self._build_unverified_citation_evidence(
+            book_id=book_id,
+            chapter_number=chapter_number,
+            citation_id=citation_id,
+            message=f"Citation {citation_id} could not be verified.",
+        )
+
     def _save_pdf_metadata(
         self,
         *,
@@ -867,6 +926,27 @@ class UploadedBookStore:
             "model": model,
             "generated_at": None,
             "summary": None,
+        }
+
+    def _build_unverified_citation_evidence(
+        self,
+        *,
+        book_id: int,
+        chapter_number: int,
+        citation_id: str,
+        message: str,
+        source_location: str | None = None,
+        page_number: int | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "book_id": book_id,
+            "chapter_number": chapter_number,
+            "citation_id": citation_id,
+            "verification_status": "unverified",
+            "message": message,
+            "source_location": source_location,
+            "page_number": page_number,
+            "source_excerpt": None,
         }
 
     def _extract_pdf_pages(self, book_id: int, pdf_content: bytes) -> list[dict[str, Any]]:

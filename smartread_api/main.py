@@ -176,6 +176,29 @@ def create_app(
                 detail="Chapter Summary has not been generated yet.",
             ) from None
 
+    @app.get("/books/{book_id}/chapter-boundaries/{chapter_number}/summary/citations/{citation_id}/evidence")
+    def get_chapter_summary_citation_evidence(
+        book_id: int,
+        chapter_number: int,
+        citation_id: str,
+    ) -> dict[str, object]:
+        try:
+            return store.get_chapter_summary_citation_evidence(
+                book_id,
+                chapter_number,
+                citation_id,
+            )
+        except AcceptedChapterNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="Accepted chapter boundary was not found.",
+            ) from None
+        except ChapterSummaryNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="Chapter Summary has not been generated yet.",
+            ) from None
+
     return app
 
 

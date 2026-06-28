@@ -66,6 +66,18 @@ class ChapterSummaryResult:
     retryable: bool = False
 
 
+@dataclass(frozen=True)
+class CitationEvidenceResult:
+    success: bool
+    message: str
+    citation_id: str
+    verification_status: str = "unverified"
+    source_location: str | None = None
+    page_number: int | None = None
+    source_excerpt: str | None = None
+    retryable: bool = False
+
+
 def get_uploaded_books(
     api_base_url: str,
     *,
@@ -332,6 +344,48 @@ def get_chapter_summary_from_api(
         return ChapterSummaryResult(
             success=False,
             message="Summary could not be loaded. Check the FastAPI backend, then try again.",
+            retryable=True,
+        )
+
+
+def get_citation_evidence_from_api(
+    api_base_url: str,
+    *,
+    book_id: int,
+    chapter_number: int,
+    citation_id: str,
+    client: httpx.Client | None = None,
+) -> CitationEvidenceResult:
+    http_client = client or httpx.Client(timeout=10.0)
+    try:
+        response = http_client.get(
+            f"{api_base_url.rstrip('/')}/books/{book_id}/chapter-boundaries/"
+            f"{chapter_number}/summary/citations/{citation_id}/evidence"
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            return CitationEvidenceResult(
+                success=True,
+                message=payload["message"],
+                citation_id=payload["citation_id"],
+                verification_status=payload["verification_status"],
+                source_location=payload["source_location"],
+                page_number=payload["page_number"],
+                source_excerpt=payload["source_excerpt"],
+            )
+
+        detail = response.json().get("detail", {})
+        return CitationEvidenceResult(
+            success=False,
+            message=detail if isinstance(detail, str) else "Evidence could not be loaded.",
+            citation_id=citation_id,
+            retryable=response.status_code != 404,
+        )
+    except httpx.HTTPError:
+        return CitationEvidenceResult(
+            success=False,
+            message="Evidence could not be loaded. Check the FastAPI backend, then try again.",
+            citation_id=citation_id,
             retryable=True,
         )
 

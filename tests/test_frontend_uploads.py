@@ -6,6 +6,7 @@ from smartread_frontend.uploads import (
     generate_chapter_summary_from_api,
     get_chapter_boundaries_from_api,
     get_chapter_summary_from_api,
+    get_citation_evidence_from_api,
     get_uploaded_books,
     save_chapter_boundaries_to_api,
     upload_pdf_to_api,
@@ -461,3 +462,91 @@ def test_get_chapter_summary_from_api_loads_persisted_summary():
     assert result.message == "Summary loaded for Chapter 1: Deep Focus."
     assert result.summary is not None
     assert result.summary["central_argument"]["claim"] == "Persisted focus summary."
+
+
+def test_get_citation_evidence_from_api_reports_verified_excerpt():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert (
+            str(request.url)
+            == "http://api.test/books/7/chapter-boundaries/1/summary/citations/c1/evidence"
+        )
+        return httpx.Response(
+            200,
+            json={
+                "book_id": 7,
+                "chapter_number": 1,
+                "citation_id": "c1",
+                "verification_status": "verified",
+                "message": "Citation c1 is verified.",
+                "source_location": "book:7:page:1",
+                "page_number": 1,
+                "source_excerpt": "Focus improves when attention is protected.",
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = get_citation_evidence_from_api(
+        "http://api.test",
+        book_id=7,
+        chapter_number=1,
+        citation_id="c1",
+        client=client,
+    )
+
+    assert result.success is True
+    assert result.verification_status == "verified"
+    assert result.page_number == 1
+    assert result.source_excerpt == "Focus improves when attention is protected."
+
+
+def test_get_citation_evidence_from_api_reports_unverified_missing_citation():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "book_id": 7,
+                "chapter_number": 1,
+                "citation_id": "bad-id",
+                "verification_status": "unverified",
+                "message": "Citation bad-id could not be verified.",
+                "source_location": None,
+                "page_number": None,
+                "source_excerpt": None,
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = get_citation_evidence_from_api(
+        "http://api.test",
+        book_id=7,
+        chapter_number=1,
+        citation_id="bad-id",
+        client=client,
+    )
+
+    assert result.success is True
+    assert result.verification_status == "unverified"
+    assert result.message == "Citation bad-id could not be verified."
+    assert result.source_excerpt is None
+
+
+def test_get_citation_evidence_from_api_reports_retryable_loading_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("backend down", request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = get_citation_evidence_from_api(
+        "http://api.test",
+        book_id=7,
+        chapter_number=1,
+        citation_id="c1",
+        client=client,
+    )
+
+    assert result.success is False
+    assert result.retryable is True
+    assert result.message == "Evidence could not be loaded. Check the FastAPI backend, then try again."
