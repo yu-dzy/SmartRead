@@ -1,0 +1,1 @@
+"""SmartRead Streamlit frontend package."""
