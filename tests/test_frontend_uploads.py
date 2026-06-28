@@ -1,6 +1,10 @@
 import httpx
 
-from smartread_frontend.uploads import get_uploaded_books, upload_pdf_to_api
+from smartread_frontend.uploads import (
+    extract_pdf_text_from_api,
+    get_uploaded_books,
+    upload_pdf_to_api,
+)
 
 
 PDF_BYTES = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
@@ -110,5 +114,81 @@ def test_upload_pdf_to_api_reports_retryable_backend_error():
 
     assert result.success is False
     assert result.message == "The PDF could not be read. Upload a valid PDF and try again."
+    assert result.retryable is True
+    assert result.book == failed_book
+
+
+def test_extract_pdf_text_from_api_reports_extraction_summary():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert str(request.url) == "http://api.test/books/7/extraction"
+        return httpx.Response(
+            200,
+            json={
+                "book": {
+                    "id": 7,
+                    "original_filename": "learning.pdf",
+                    "content_type": "application/pdf",
+                    "file_size": 100,
+                    "uploaded_at": "2026-06-27T12:00:00Z",
+                    "upload_status": "uploaded",
+                    "processing_status": "extracted",
+                    "error_message": None,
+                },
+                "summary": {
+                    "page_count": 2,
+                    "text_page_count": 2,
+                    "blank_page_count": 0,
+                },
+                "pages": [
+                    {
+                        "book_id": 7,
+                        "page_number": 1,
+                        "source_location": "book:7:page:1",
+                        "extracted_text": "First page",
+                    }
+                ],
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = extract_pdf_text_from_api("http://api.test", book_id=7, client=client)
+
+    assert result.success is True
+    assert result.message == "Extraction complete: 2 pages, 2 with text, 0 blank."
+    assert result.summary["page_count"] == 2
+
+
+def test_extract_pdf_text_from_api_reports_retryable_failure():
+    failed_book = {
+        "id": 7,
+        "original_filename": "corrupt.pdf",
+        "content_type": "application/pdf",
+        "file_size": 100,
+        "uploaded_at": "2026-06-27T12:00:00Z",
+        "upload_status": "uploaded",
+        "processing_status": "extraction_failed",
+        "error_message": "Text extraction failed. Retry extraction or upload a cleaner PDF.",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            422,
+            json={
+                "detail": {
+                    "message": failed_book["error_message"],
+                    "retryable": True,
+                    "book": failed_book,
+                }
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = extract_pdf_text_from_api("http://api.test", book_id=7, client=client)
+
+    assert result.success is False
+    assert result.message == "Text extraction failed. Retry extraction or upload a cleaner PDF."
     assert result.retryable is True
     assert result.book == failed_book
