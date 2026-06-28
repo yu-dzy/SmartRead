@@ -19,6 +19,7 @@ try:
         get_quiz_progress_from_api,
         get_quiz_from_api,
         get_uploaded_books,
+        retry_missed_question_to_api,
         save_chapter_boundaries_to_api,
         submit_quiz_answer_to_api,
         upload_pdf_to_api,
@@ -42,6 +43,7 @@ except ModuleNotFoundError as error:
         get_quiz_progress_from_api,
         get_quiz_from_api,
         get_uploaded_books,
+        retry_missed_question_to_api,
         save_chapter_boundaries_to_api,
         submit_quiz_answer_to_api,
         upload_pdf_to_api,
@@ -537,10 +539,22 @@ def _render_review_tab(*, api_url: str, books_result: object | None) -> None:
                 book_id=int(book["id"]),
                 chapter_number=chapter_number,
             )
+            quiz_result = _load_quiz_result(
+                api_url=api_url,
+                book_id=int(book["id"]),
+                chapter_number=chapter_number,
+            )
+            _render_last_retry_feedback(book_id=int(book["id"]), chapter_number=chapter_number)
             if result is not None and result.success and result.missed_concepts:
                 any_missed_concepts = True
             if result is not None:
-                _render_missed_concepts_result(result)
+                _render_missed_concepts_result(
+                    result,
+                    quiz_result=quiz_result,
+                    api_url=api_url,
+                    book_id=int(book["id"]),
+                    chapter_number=chapter_number,
+                )
 
     if not any_missed_concepts:
         st.markdown("No missed concepts are due from checked answers.")
@@ -564,7 +578,14 @@ def _load_missed_concepts_result(
     return st.session_state.get(result_key)
 
 
-def _render_missed_concepts_result(result: object) -> None:
+def _render_missed_concepts_result(
+    result: object,
+    *,
+    quiz_result: object | None,
+    api_url: str,
+    book_id: int,
+    chapter_number: int,
+) -> None:
     if not result.success:
         st.error(result.message)
         st.markdown(result.message)
@@ -576,15 +597,77 @@ def _render_missed_concepts_result(result: object) -> None:
         return
 
     st.markdown("### Missed Concepts")
+    questions_by_id = _questions_by_id(quiz_result)
     for concept in result.missed_concepts:
+        question_id = str(concept["question_id"])
         st.markdown(f"**{concept['concept_name']}**")
-        st.markdown(f"Question: {concept['question_id']}")
+        st.markdown(f"Question: {question_id}")
+        question = questions_by_id.get(question_id)
+        if question is not None:
+            st.markdown(str(question["question_text"]))
         st.markdown(concept["explanation"])
         st.markdown(f"Citation {concept['citation_id']}")
         if concept.get("page_number"):
             st.markdown(f"Page {concept['page_number']}")
         if concept.get("source_excerpt"):
             st.markdown(f"Source excerpt: {concept['source_excerpt']}")
+        if question is not None:
+            selected_answer = st.radio(
+                f"Retry answer for {question_id}",
+                question["answer_options"],
+                key=f"retry_answer_{book_id}_{chapter_number}_{question_id}",
+            )
+            if st.button(
+                f"Retry missed question {question_id}",
+                key=f"retry_missed_question_{book_id}_{chapter_number}_{question_id}",
+            ):
+                with st.spinner("Retrying missed question..."):
+                    retry_result = retry_missed_question_to_api(
+                        api_url,
+                        book_id=book_id,
+                        chapter_number=chapter_number,
+                        question_id=question_id,
+                        selected_answer=str(selected_answer),
+                    )
+                if retry_result.success:
+                    _store_quiz_answer_feedback(
+                        book_id=book_id,
+                        chapter_number=chapter_number,
+                        answer_result=retry_result,
+                    )
+                    st.session_state[
+                        f"last_retry_feedback_{book_id}_{chapter_number}"
+                    ] = retry_result
+                    st.session_state["current_quiz_progress"] = retry_result.progress or {}
+                    st.rerun()
+                else:
+                    st.error(retry_result.message)
+                    st.markdown(retry_result.message)
+                    if retry_result.retryable:
+                        st.markdown("Retry this missed question after FastAPI recovers.")
+
+
+def _questions_by_id(quiz_result: object | None) -> dict[str, dict[str, object]]:
+    if quiz_result is None or not quiz_result.success or not quiz_result.quiz:
+        return {}
+
+    return {
+        str(question["id"]): question
+        for question in quiz_result.quiz.get("questions", [])
+    }
+
+
+def _render_last_retry_feedback(*, book_id: int, chapter_number: int) -> None:
+    retry_result = st.session_state.get(f"last_retry_feedback_{book_id}_{chapter_number}")
+    if retry_result is None:
+        return
+
+    if retry_result.missed_concept_status == "resolved":
+        st.success("Missed Concept resolved.")
+        st.markdown("Missed Concept resolved.")
+    elif retry_result.missed_concept_status == "active":
+        st.warning("Missed Concept is still active.")
+        st.markdown("Missed Concept is still active.")
 
 
 def _load_quiz_result(
@@ -734,7 +817,7 @@ def _store_quiz_answer_feedback(
             answers=[answer],
             retryable=False,
         )
-        if answer_result.is_correct is False:
+        if answer_result.is_correct is False or answer_result.missed_concept_status is not None:
             st.session_state.pop(missed_concepts_key, None)
         return
 
@@ -751,7 +834,7 @@ def _store_quiz_answer_feedback(
         answers=answers,
         retryable=False,
     )
-    if answer_result.is_correct is False:
+    if answer_result.is_correct is False or answer_result.missed_concept_status is not None:
         st.session_state.pop(missed_concepts_key, None)
 
 

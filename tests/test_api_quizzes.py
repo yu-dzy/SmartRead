@@ -361,6 +361,186 @@ def test_missed_concepts_reload_after_restart(tmp_path):
     assert payload["missed_concepts"][0]["question_id"] == "q1"
 
 
+def test_correct_retry_resolves_missed_concept_and_recalculates_mastery(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    client = TestClient(
+        create_app(
+            database_path=tmp_path / "smartread.db",
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Long-term memory"},
+    )
+
+    retry_response = client.post(
+        f"/books/{book_id}/chapter-boundaries/1/missed-concepts/q1/retry",
+        json={"selected_answer": "Constant switching"},
+    )
+    progress_response = client.get(f"/books/{book_id}/chapter-boundaries/1/quiz/progress")
+    missed_response = client.get(f"/books/{book_id}/chapter-boundaries/1/missed-concepts")
+
+    assert retry_response.status_code == 200
+    retry_payload = retry_response.json()
+    assert retry_payload["selected_answer"] == "Constant switching"
+    assert retry_payload["is_correct"] is True
+    assert retry_payload["missed_concept_status"] == "resolved"
+    assert retry_payload["progress"] == {
+        "answered_count": 1,
+        "correct_count": 1,
+        "incorrect_count": 0,
+        "total_questions": 5,
+    }
+    assert progress_response.json()["answers"][0]["selected_answer"] == "Constant switching"
+    assert progress_response.json()["answers"][0]["is_correct"] is True
+    assert missed_response.json()["missed_concepts"] == []
+
+
+def test_incorrect_retry_keeps_missed_concept_active(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    client = TestClient(
+        create_app(
+            database_path=tmp_path / "smartread.db",
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Long-term memory"},
+    )
+
+    retry_response = client.post(
+        f"/books/{book_id}/chapter-boundaries/1/missed-concepts/q1/retry",
+        json={"selected_answer": "Chapter boundaries"},
+    )
+    missed_response = client.get(f"/books/{book_id}/chapter-boundaries/1/missed-concepts")
+
+    assert retry_response.status_code == 200
+    retry_payload = retry_response.json()
+    assert retry_payload["selected_answer"] == "Chapter boundaries"
+    assert retry_payload["is_correct"] is False
+    assert retry_payload["missed_concept_status"] == "active"
+    assert retry_payload["progress"] == {
+        "answered_count": 1,
+        "correct_count": 0,
+        "incorrect_count": 1,
+        "total_questions": 5,
+    }
+    assert missed_response.json()["summary"] == {"missed_concept_count": 1}
+    assert missed_response.json()["missed_concepts"][0]["question_id"] == "q1"
+
+
+def test_duplicate_missed_question_retry_updates_one_saved_answer_record(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    client = TestClient(
+        create_app(
+            database_path=tmp_path / "smartread.db",
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Long-term memory"},
+    )
+
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/missed-concepts/q1/retry",
+        json={"selected_answer": "Chapter boundaries"},
+    )
+    retry_response = client.post(
+        f"/books/{book_id}/chapter-boundaries/1/missed-concepts/q1/retry",
+        json={"selected_answer": "Chapter boundaries"},
+    )
+    progress_response = client.get(f"/books/{book_id}/chapter-boundaries/1/quiz/progress")
+    missed_response = client.get(f"/books/{book_id}/chapter-boundaries/1/missed-concepts")
+
+    assert retry_response.status_code == 200
+    assert len(progress_response.json()["answers"]) == 1
+    assert progress_response.json()["answers"][0]["selected_answer"] == "Chapter boundaries"
+    assert len(missed_response.json()["missed_concepts"]) == 1
+
+
+def test_retry_rejects_question_that_is_not_currently_missed(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    client = TestClient(
+        create_app(
+            database_path=tmp_path / "smartread.db",
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Constant switching"},
+    )
+
+    response = client.post(
+        f"/books/{book_id}/chapter-boundaries/1/missed-concepts/q1/retry",
+        json={"selected_answer": "Constant switching"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Missed question was not found."
+
+
+def test_retry_results_reload_after_restart(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    database_path = tmp_path / "smartread.db"
+    client = TestClient(
+        create_app(
+            database_path=database_path,
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Long-term memory"},
+    )
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/missed-concepts/q1/retry",
+        json={"selected_answer": "Constant switching"},
+    )
+
+    reloaded_client = TestClient(
+        create_app(
+            database_path=database_path,
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+        )
+    )
+    progress_response = reloaded_client.get(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/progress"
+    )
+    missed_response = reloaded_client.get(
+        f"/books/{book_id}/chapter-boundaries/1/missed-concepts"
+    )
+
+    assert progress_response.status_code == 200
+    assert progress_response.json()["progress"] == {
+        "answered_count": 1,
+        "correct_count": 1,
+        "incorrect_count": 0,
+        "total_questions": 5,
+    }
+    assert progress_response.json()["answers"][0]["selected_answer"] == "Constant switching"
+    assert missed_response.json()["missed_concepts"] == []
+
+
 def test_list_missed_concepts_rejects_invalid_chapter_record(tmp_path):
     client = TestClient(
         create_app(

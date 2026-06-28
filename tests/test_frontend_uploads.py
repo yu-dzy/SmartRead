@@ -14,6 +14,7 @@ from smartread_frontend.uploads import (
     get_quiz_progress_from_api,
     get_quiz_from_api,
     get_uploaded_books,
+    retry_missed_question_to_api,
     save_chapter_boundaries_to_api,
     submit_quiz_answer_to_api,
     upload_pdf_to_api,
@@ -920,6 +921,76 @@ def test_get_missed_concepts_from_api_reports_recoverable_loading_error():
     assert result.success is False
     assert result.retryable is True
     assert result.message == "Missed Concepts could not be loaded. Check FastAPI, then try again."
+
+
+def test_retry_missed_question_to_api_reports_resolved_feedback():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert (
+            str(request.url)
+            == "http://api.test/books/7/chapter-boundaries/1/missed-concepts/q1/retry"
+        )
+        assert request.read() == b'{"selected_answer":"Constant switching"}'
+        return httpx.Response(
+            200,
+            json={
+                "book_id": 7,
+                "chapter_number": 1,
+                "question_id": "q1",
+                "selected_answer": "Constant switching",
+                "is_correct": True,
+                "correct_answer": "Constant switching",
+                "explanation": "Protected attention reduces constant switching.",
+                "tested_concept": "Protected Attention",
+                "citation_id": "qc1",
+                "source_location": "book:7:page:1",
+                "page_number": 1,
+                "source_excerpt": "Protected attention reduces constant switching.",
+                "progress": {
+                    "answered_count": 1,
+                    "correct_count": 1,
+                    "incorrect_count": 0,
+                    "total_questions": 5,
+                },
+                "missed_concept_status": "resolved",
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = retry_missed_question_to_api(
+        "http://api.test",
+        book_id=7,
+        chapter_number=1,
+        question_id="q1",
+        selected_answer="Constant switching",
+        client=client,
+    )
+
+    assert result.success is True
+    assert result.is_correct is True
+    assert result.missed_concept_status == "resolved"
+    assert result.progress["correct_count"] == 1
+
+
+def test_retry_missed_question_to_api_reports_recoverable_backend_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("backend down", request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = retry_missed_question_to_api(
+        "http://api.test",
+        book_id=7,
+        chapter_number=1,
+        question_id="q1",
+        selected_answer="Constant switching",
+        client=client,
+    )
+
+    assert result.success is False
+    assert result.retryable is True
+    assert result.message == "Retry failed. Check the FastAPI backend, then try again."
 
 
 def _quiz_payload() -> dict[str, object]:

@@ -2,7 +2,7 @@
 
 SmartRead is a private learning system for cited chapter lessons, active recall, and targeted review.
 
-## Issue #11 Missed Concepts Slice
+## Issue #12 Retry Missed Questions Slice
 
 Start the FastAPI backend:
 
@@ -41,6 +41,8 @@ After a quiz is generated, answer each objective question in the Quiz tab. FastA
 
 Incorrect objective answers create Missed Concepts linked to the tested Core Concept, quiz question, chapter, saved answer attempt, explanation, and supporting citation. Correct answers do not create Missed Concepts. Duplicate misses for the same concept are collapsed into one chapter-level Missed Concept, and persisted Missed Concepts reload in the Review tab after restart.
 
+Use the Review tab to retry only active missed questions. Correctly answered questions stay unchanged and are not shown in the retry flow. Retried answers are graded by application code, update the saved answer, recalculate mastery, and persist after restart. A correct retry resolves the linked Missed Concept; another incorrect retry keeps it active without creating duplicate retry records.
+
 Real Summary, Core Concepts, Key Takeaways, and Quiz generation use OpenAI by default with model `gpt-5.5`. Set the API key before starting FastAPI:
 
 ```powershell
@@ -53,7 +55,7 @@ To override the default model:
 $env:SMARTREAD_OPENAI_MODEL = "gpt-5.5"
 ```
 
-Retrying missed questions and spaced review queues are not implemented yet.
+Spaced review queues are not implemented yet.
 
 By default, metadata is saved at `.smartread/smartread.db`. To use another database file:
 

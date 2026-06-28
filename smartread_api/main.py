@@ -12,6 +12,7 @@ from smartread_api.uploaded_books import (
     ChapterQuizNotFoundError,
     ChapterSummaryNotFoundError,
     ConceptsTakeawaysNotFoundError,
+    MissedQuestionNotFoundError,
     PdfExtractionError,
     QuizAnswerValidationError,
     QuizQuestionNotFoundError,
@@ -363,6 +364,46 @@ def create_app(
                 status_code=404,
                 detail="Accepted chapter boundary was not found.",
             ) from None
+
+    @app.post("/books/{book_id}/chapter-boundaries/{chapter_number}/missed-concepts/{question_id}/retry")
+    def retry_missed_question(
+        book_id: int,
+        chapter_number: int,
+        question_id: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        try:
+            selected_answer = payload.get("selected_answer")
+            if not isinstance(selected_answer, str):
+                raise QuizAnswerValidationError("Choose an answer before retrying it.")
+            return store.retry_missed_question(
+                book_id,
+                chapter_number,
+                question_id,
+                selected_answer,
+            )
+        except AcceptedChapterNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="Accepted chapter boundary was not found.",
+            ) from None
+        except ChapterQuizNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="Quiz has not been generated yet.",
+            ) from None
+        except QuizQuestionNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="Quiz question was not found.",
+            ) from None
+        except MissedQuestionNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="Missed question was not found.",
+            ) from None
+        except QuizAnswerValidationError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from None
 
     return app
 
