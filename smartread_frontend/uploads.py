@@ -39,6 +39,15 @@ class ChapterDetectionResult:
     retryable: bool = False
 
 
+@dataclass(frozen=True)
+class ChapterBoundaryReviewResult:
+    success: bool
+    message: str
+    chapters: list[dict[str, Any]]
+    book: dict[str, Any] | None = None
+    retryable: bool = False
+
+
 def get_uploaded_books(
     api_base_url: str,
     *,
@@ -152,6 +161,45 @@ def detect_chapters_from_api(
         )
 
 
+def save_chapter_boundaries_to_api(
+    api_base_url: str,
+    *,
+    book_id: int,
+    chapters: list[dict[str, Any]],
+    client: httpx.Client | None = None,
+) -> ChapterBoundaryReviewResult:
+    http_client = client or httpx.Client(timeout=10.0)
+    try:
+        response = http_client.put(
+            f"{api_base_url.rstrip('/')}/books/{book_id}/chapter-boundaries",
+            json={"chapters": chapters},
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            accepted_chapters = payload["chapters"]
+            return ChapterBoundaryReviewResult(
+                success=True,
+                message=_format_boundary_review_summary(len(accepted_chapters)),
+                chapters=accepted_chapters,
+                book=payload["book"],
+            )
+
+        detail = response.json().get("detail", {})
+        return ChapterBoundaryReviewResult(
+            success=False,
+            message=detail if isinstance(detail, str) else "Boundary review failed. Try again.",
+            chapters=[],
+            retryable=True,
+        )
+    except httpx.HTTPError:
+        return ChapterBoundaryReviewResult(
+            success=False,
+            message="Boundary review failed. Check the FastAPI backend, then try again.",
+            chapters=[],
+            retryable=True,
+        )
+
+
 def upload_pdf_to_api(
     api_base_url: str,
     *,
@@ -214,3 +262,8 @@ def _format_chapter_detection_summary(summary: dict[str, Any]) -> str:
         return "No chapters could be detected. Manual chapter review will be required."
 
     return f"Detected {chapter_count} chapters with {confidence} confidence."
+
+
+def _format_boundary_review_summary(chapter_count: int) -> str:
+    noun = "boundary" if chapter_count == 1 else "boundaries"
+    return f"Accepted {chapter_count} reviewed chapter {noun}."

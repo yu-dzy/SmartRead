@@ -8,6 +8,7 @@ try:
         detect_chapters_from_api,
         extract_pdf_text_from_api,
         get_uploaded_books,
+        save_chapter_boundaries_to_api,
         upload_pdf_to_api,
     )
 except ModuleNotFoundError as error:
@@ -19,6 +20,7 @@ except ModuleNotFoundError as error:
         detect_chapters_from_api,
         extract_pdf_text_from_api,
         get_uploaded_books,
+        save_chapter_boundaries_to_api,
         upload_pdf_to_api,
     )
 
@@ -107,6 +109,7 @@ def main() -> None:
                             st.markdown("Retry extraction or upload a cleaner PDF.")
                     books_result = get_uploaded_books(api_url)
                 if book.get("processing_status") == "extracted":
+                    review_key = f"review_chapters_{book['id']}"
                     if st.button("Detect chapters", key=f"detect_{book['id']}"):
                         with st.spinner("Detecting chapters..."):
                             detection_result = detect_chapters_from_api(
@@ -120,13 +123,21 @@ def main() -> None:
                             if warning:
                                 st.warning(warning)
                                 st.markdown(warning)
-                            _render_book_map(detection_result.chapters)
+                            st.session_state[review_key] = detection_result.chapters
                         else:
                             st.error(detection_result.message)
                             st.markdown(detection_result.message)
                             if detection_result.retryable:
                                 st.markdown("Retry chapter detection after text extraction.")
                         books_result = get_uploaded_books(api_url)
+                    if review_key in st.session_state:
+                        _render_book_map(st.session_state[review_key])
+                        _render_chapter_boundary_review(
+                            api_url=api_url,
+                            book_id=book["id"],
+                            chapters=st.session_state[review_key],
+                            review_key=review_key,
+                        )
 
     with center:
         st.markdown("## Chapter Lesson")
@@ -152,6 +163,122 @@ def _render_book_map(chapters: list[dict[str, object]]) -> None:
                 f"{chapter['confidence']} confidence"
             )
     st.markdown("Chapter lesson generation remains unavailable until boundaries are reviewed.")
+
+
+def _render_chapter_boundary_review(
+    *,
+    api_url: str,
+    book_id: int,
+    chapters: list[dict[str, object]],
+    review_key: str,
+) -> None:
+    st.markdown("### Review Boundaries")
+    edited_chapters = []
+    for index, chapter in enumerate(chapters, start=1):
+        chapter_number = int(chapter.get("chapter_number", index))
+        title = st.text_input(
+            f"Chapter {chapter_number} title",
+            value=str(chapter["title"]),
+            key=f"title_{book_id}_{chapter_number}",
+        )
+        start_page = st.number_input(
+            f"Chapter {chapter_number} start page",
+            min_value=1,
+            value=int(chapter["start_page"]),
+            step=1,
+            key=f"start_{book_id}_{chapter_number}",
+        )
+        end_page = st.number_input(
+            f"Chapter {chapter_number} end page",
+            min_value=1,
+            value=int(chapter["end_page"]),
+            step=1,
+            key=f"end_{book_id}_{chapter_number}",
+        )
+        edited_chapters.append(
+            {
+                "chapter_number": chapter_number,
+                "title": title,
+                "start_page": int(start_page),
+                "end_page": int(end_page),
+            }
+        )
+
+    if st.button("Merge first two chapters", key=f"merge_{book_id}", disabled=len(chapters) < 2):
+        st.session_state[review_key] = _merge_first_two_chapters(chapters)
+        st.rerun()
+
+    first_chapter_can_split = bool(chapters) and int(chapters[0]["start_page"]) < int(
+        chapters[0]["end_page"]
+    )
+    if st.button("Split first chapter", key=f"split_{book_id}", disabled=not first_chapter_can_split):
+        st.session_state[review_key] = _split_first_chapter(chapters)
+        st.rerun()
+
+    if st.button("Save reviewed boundaries", key=f"save_boundaries_{book_id}"):
+        with st.spinner("Saving chapter boundaries..."):
+            review_result = save_chapter_boundaries_to_api(
+                api_url,
+                book_id=book_id,
+                chapters=edited_chapters,
+            )
+        if review_result.success:
+            st.success(review_result.message)
+            st.markdown(review_result.message)
+            st.markdown("Accepted chapter boundaries are saved for downstream lesson generation.")
+        else:
+            st.error(review_result.message)
+            st.markdown(review_result.message)
+            if review_result.retryable:
+                st.markdown("Adjust the boundaries and retry saving.")
+
+
+def _merge_first_two_chapters(chapters: list[dict[str, object]]) -> list[dict[str, object]]:
+    if len(chapters) < 2:
+        return chapters
+
+    first, second, *rest = chapters
+    merged = {
+        **first,
+        "chapter_number": 1,
+        "title": f"{first['title']} / {second['title']}",
+        "start_page": first["start_page"],
+        "end_page": second["end_page"],
+    }
+    return _renumber_chapters([merged, *rest])
+
+
+def _split_first_chapter(chapters: list[dict[str, object]]) -> list[dict[str, object]]:
+    if not chapters:
+        return chapters
+
+    first, *rest = chapters
+    start_page = int(first["start_page"])
+    end_page = int(first["end_page"])
+    if start_page >= end_page:
+        return chapters
+
+    split = [
+        {**first, "chapter_number": 1, "end_page": start_page},
+        {
+            **first,
+            "chapter_number": 2,
+            "title": f"{first['title']} Part 2",
+            "start_page": start_page + 1,
+            "end_page": end_page,
+        },
+    ]
+    return _renumber_chapters([*split, *rest])
+
+
+def _renumber_chapters(chapters: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        {
+            **chapter,
+            "chapter_number": index,
+        }
+        for index, chapter in enumerate(chapters, start=1)
+    ]
 
 
 if __name__ == "__main__":

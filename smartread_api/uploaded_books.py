@@ -22,6 +22,14 @@ class PdfExtractionError(Exception):
         self.book = book
 
 
+class ChapterBoundaryValidationError(Exception):
+    pass
+
+
+class AcceptedChapterNotFoundError(Exception):
+    pass
+
+
 CHAPTER_HEADING_PATTERN = re.compile(
     r"^\s*(?:chapter|ch\.?)\s+(?P<label>[0-9ivxlcdm]+)\s*[:.\-]?\s*(?P<title>.+)?$",
     re.IGNORECASE,
@@ -280,6 +288,153 @@ class UploadedBookStore:
 
         return [self._to_detected_chapter(row) for row in rows]
 
+    def save_accepted_chapter_boundaries(
+        self,
+        book_id: int,
+        chapters: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            book_row = connection.execute(
+                "SELECT * FROM uploaded_books WHERE id = ?",
+                (book_id,),
+            ).fetchone()
+            if book_row is None:
+                raise UploadedBookNotFoundError
+
+            page_numbers = {
+                row["page_number"]
+                for row in connection.execute(
+                    "SELECT page_number FROM source_pages WHERE book_id = ?",
+                    (book_id,),
+                ).fetchall()
+            }
+
+        accepted_chapters = self._build_accepted_chapters(
+            book_id=book_id,
+            chapters=chapters,
+            page_numbers=page_numbers,
+        )
+
+        with self._connect() as connection:
+            connection.execute("DELETE FROM accepted_chapters WHERE book_id = ?", (book_id,))
+            connection.executemany(
+                """
+                INSERT INTO accepted_chapters (
+                    book_id,
+                    chapter_number,
+                    title,
+                    start_page,
+                    end_page,
+                    start_source_location,
+                    end_source_location,
+                    review_status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        chapter["book_id"],
+                        chapter["chapter_number"],
+                        chapter["title"],
+                        chapter["start_page"],
+                        chapter["end_page"],
+                        chapter["start_source_location"],
+                        chapter["end_source_location"],
+                        chapter["review_status"],
+                    )
+                    for chapter in accepted_chapters
+                ],
+            )
+            connection.execute(
+                """
+                UPDATE uploaded_books
+                SET chapter_review_status = ?
+                WHERE id = ?
+                """,
+                ("accepted", book_id),
+            )
+            book_row = connection.execute(
+                "SELECT * FROM uploaded_books WHERE id = ?",
+                (book_id,),
+            ).fetchone()
+
+        return {
+            "book": self._to_uploaded_book(book_row),
+            "chapters": accepted_chapters,
+        }
+
+    def list_accepted_chapter_boundaries(self, book_id: int) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            book_row = connection.execute(
+                "SELECT id FROM uploaded_books WHERE id = ?",
+                (book_id,),
+            ).fetchone()
+            if book_row is None:
+                raise UploadedBookNotFoundError
+
+            rows = connection.execute(
+                """
+                SELECT
+                    book_id,
+                    chapter_number,
+                    title,
+                    start_page,
+                    end_page,
+                    start_source_location,
+                    end_source_location,
+                    review_status
+                FROM accepted_chapters
+                WHERE book_id = ?
+                ORDER BY chapter_number
+                """,
+                (book_id,),
+            ).fetchall()
+
+        return [self._to_accepted_chapter(row) for row in rows]
+
+    def get_accepted_chapter_source_pages(
+        self,
+        book_id: int,
+        chapter_number: int,
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            chapter_row = connection.execute(
+                """
+                SELECT
+                    book_id,
+                    chapter_number,
+                    title,
+                    start_page,
+                    end_page,
+                    start_source_location,
+                    end_source_location,
+                    review_status
+                FROM accepted_chapters
+                WHERE book_id = ? AND chapter_number = ?
+                """,
+                (book_id, chapter_number),
+            ).fetchone()
+            if chapter_row is None:
+                raise AcceptedChapterNotFoundError
+
+            chapter = self._to_accepted_chapter(chapter_row)
+            page_rows = connection.execute(
+                """
+                SELECT book_id, page_number, source_location, extracted_text
+                FROM source_pages
+                WHERE book_id = ?
+                  AND page_number >= ?
+                  AND page_number <= ?
+                ORDER BY page_number
+                """,
+                (book_id, chapter["start_page"], chapter["end_page"]),
+            ).fetchall()
+
+        return {
+            "chapter": chapter,
+            "pages": [self._to_source_page(row) for row in page_rows],
+        }
+
     def _save_pdf_metadata(
         self,
         *,
@@ -357,6 +512,7 @@ class UploadedBookStore:
                     chapter_detection_status TEXT NOT NULL DEFAULT 'not_started',
                     chapter_detection_confidence TEXT,
                     chapter_detection_message TEXT,
+                    chapter_review_status TEXT NOT NULL DEFAULT 'not_started',
                     UNIQUE(original_filename, file_size, content_sha256)
                 )
                 """
@@ -384,6 +540,13 @@ class UploadedBookStore:
                 connection.execute(
                     "ALTER TABLE uploaded_books ADD COLUMN chapter_detection_message TEXT"
                 )
+            if "chapter_review_status" not in columns:
+                connection.execute(
+                    """
+                    ALTER TABLE uploaded_books
+                    ADD COLUMN chapter_review_status TEXT NOT NULL DEFAULT 'not_started'
+                    """
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS source_pages (
@@ -393,6 +556,23 @@ class UploadedBookStore:
                     source_location TEXT NOT NULL,
                     extracted_text TEXT NOT NULL,
                     UNIQUE(book_id, page_number),
+                    FOREIGN KEY(book_id) REFERENCES uploaded_books(id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS accepted_chapters (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    book_id INTEGER NOT NULL,
+                    chapter_number INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    start_page INTEGER NOT NULL,
+                    end_page INTEGER NOT NULL,
+                    start_source_location TEXT NOT NULL,
+                    end_source_location TEXT NOT NULL,
+                    review_status TEXT NOT NULL,
+                    UNIQUE(book_id, chapter_number),
                     FOREIGN KEY(book_id) REFERENCES uploaded_books(id)
                 )
                 """
@@ -454,6 +634,7 @@ class UploadedBookStore:
             "chapter_detection_status": row["chapter_detection_status"],
             "chapter_detection_confidence": row["chapter_detection_confidence"],
             "chapter_detection_message": row["chapter_detection_message"],
+            "chapter_review_status": row["chapter_review_status"],
         }
 
     def _to_source_page(self, row: sqlite3.Row) -> dict[str, Any]:
@@ -475,6 +656,18 @@ class UploadedBookStore:
             "end_source_location": row["end_source_location"],
             "confidence": row["confidence"],
             "detection_source": row["detection_source"],
+        }
+
+    def _to_accepted_chapter(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "book_id": row["book_id"],
+            "chapter_number": row["chapter_number"],
+            "title": row["title"],
+            "start_page": row["start_page"],
+            "end_page": row["end_page"],
+            "start_source_location": row["start_source_location"],
+            "end_source_location": row["end_source_location"],
+            "review_status": row["review_status"],
         }
 
     def _extract_pdf_pages(self, book_id: int, pdf_content: bytes) -> list[dict[str, Any]]:
@@ -675,3 +868,55 @@ class UploadedBookStore:
                 else None
             ),
         }
+
+    def _build_accepted_chapters(
+        self,
+        *,
+        book_id: int,
+        chapters: list[dict[str, Any]],
+        page_numbers: set[int],
+    ) -> list[dict[str, Any]]:
+        if not chapters:
+            raise ChapterBoundaryValidationError("At least one chapter boundary is required.")
+        if not page_numbers:
+            raise ChapterBoundaryValidationError("Extract pages before reviewing chapter boundaries.")
+
+        accepted_chapters = []
+        for index, chapter in enumerate(chapters, start=1):
+            title = str(chapter.get("title", "")).strip()
+            start_page = chapter.get("start_page")
+            end_page = chapter.get("end_page")
+
+            if not title:
+                raise ChapterBoundaryValidationError("Each accepted chapter needs a title.")
+            if not isinstance(start_page, int) or not isinstance(end_page, int):
+                raise ChapterBoundaryValidationError("Chapter start and end pages must be numbers.")
+            if start_page > end_page:
+                raise ChapterBoundaryValidationError("Chapter start page must be before its end page.")
+            if start_page not in page_numbers or end_page not in page_numbers:
+                raise ChapterBoundaryValidationError("Chapter boundaries must use extracted PDF pages.")
+
+            accepted_chapters.append(
+                {
+                    "book_id": book_id,
+                    "chapter_number": int(chapter.get("chapter_number", index)),
+                    "title": title,
+                    "start_page": start_page,
+                    "end_page": end_page,
+                    "start_source_location": f"book:{book_id}:page:{start_page}",
+                    "end_source_location": f"book:{book_id}:page:{end_page}",
+                    "review_status": "accepted",
+                }
+            )
+
+        ranges_by_start_page = sorted(
+            accepted_chapters,
+            key=lambda chapter: (chapter["start_page"], chapter["end_page"]),
+        )
+        previous_end_page = 0
+        for chapter in ranges_by_start_page:
+            if chapter["start_page"] <= previous_end_page:
+                raise ChapterBoundaryValidationError("Accepted chapter boundaries cannot overlap.")
+            previous_end_page = chapter["end_page"]
+
+        return accepted_chapters

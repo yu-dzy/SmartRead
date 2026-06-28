@@ -4,6 +4,8 @@ from pathlib import Path
 from fastapi import FastAPI, File, HTTPException, UploadFile
 
 from smartread_api.uploaded_books import (
+    AcceptedChapterNotFoundError,
+    ChapterBoundaryValidationError,
     PdfExtractionError,
     UploadedBookNotFoundError,
     UploadedBookStore,
@@ -97,6 +99,35 @@ def create_app(database_path: str | Path | None = None) -> FastAPI:
             return {"chapters": store.list_chapters_for_book(book_id)}
         except UploadedBookNotFoundError:
             raise HTTPException(status_code=404, detail="Uploaded Book was not found.") from None
+
+    @app.put("/books/{book_id}/chapter-boundaries")
+    def save_chapter_boundaries(book_id: int, payload: dict[str, object]) -> dict[str, object]:
+        try:
+            chapters = payload.get("chapters")
+            if not isinstance(chapters, list):
+                raise ChapterBoundaryValidationError("Accepted chapter boundaries are required.")
+            return store.save_accepted_chapter_boundaries(book_id, chapters)
+        except UploadedBookNotFoundError:
+            raise HTTPException(status_code=404, detail="Uploaded Book was not found.") from None
+        except ChapterBoundaryValidationError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from None
+
+    @app.get("/books/{book_id}/chapter-boundaries")
+    def list_chapter_boundaries(book_id: int) -> dict[str, list[dict[str, object]]]:
+        try:
+            return {"chapters": store.list_accepted_chapter_boundaries(book_id)}
+        except UploadedBookNotFoundError:
+            raise HTTPException(status_code=404, detail="Uploaded Book was not found.") from None
+
+    @app.get("/books/{book_id}/chapter-boundaries/{chapter_number}/source-pages")
+    def get_chapter_source_pages(book_id: int, chapter_number: int) -> dict[str, object]:
+        try:
+            return store.get_accepted_chapter_source_pages(book_id, chapter_number)
+        except AcceptedChapterNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail="Accepted chapter boundary was not found.",
+            ) from None
 
     return app
 
