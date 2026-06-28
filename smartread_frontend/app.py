@@ -5,6 +5,7 @@ import streamlit as st
 try:
     from smartread_frontend.health import get_api_status
     from smartread_frontend.uploads import (
+        detect_chapters_from_api,
         extract_pdf_text_from_api,
         get_uploaded_books,
         upload_pdf_to_api,
@@ -14,7 +15,12 @@ except ModuleNotFoundError as error:
         raise
 
     from health import get_api_status
-    from uploads import extract_pdf_text_from_api, get_uploaded_books, upload_pdf_to_api
+    from uploads import (
+        detect_chapters_from_api,
+        extract_pdf_text_from_api,
+        get_uploaded_books,
+        upload_pdf_to_api,
+    )
 
 
 PRIVATE_UPLOAD_NOTICE = (
@@ -100,6 +106,27 @@ def main() -> None:
                         if extraction_result.retryable:
                             st.markdown("Retry extraction or upload a cleaner PDF.")
                     books_result = get_uploaded_books(api_url)
+                if book.get("processing_status") == "extracted":
+                    if st.button("Detect chapters", key=f"detect_{book['id']}"):
+                        with st.spinner("Detecting chapters..."):
+                            detection_result = detect_chapters_from_api(
+                                api_url,
+                                book_id=book["id"],
+                            )
+                        if detection_result.success:
+                            st.success(detection_result.message)
+                            st.markdown(detection_result.message)
+                            warning = detection_result.summary.get("warning")
+                            if warning:
+                                st.warning(warning)
+                                st.markdown(warning)
+                            _render_book_map(detection_result.chapters)
+                        else:
+                            st.error(detection_result.message)
+                            st.markdown(detection_result.message)
+                            if detection_result.retryable:
+                                st.markdown("Retry chapter detection after text extraction.")
+                        books_result = get_uploaded_books(api_url)
 
     with center:
         st.markdown("## Chapter Lesson")
@@ -110,6 +137,21 @@ def main() -> None:
         st.markdown("Clicked source excerpts will appear here.")
         st.markdown("## Mastery")
         st.markdown("Quiz progress and missed concepts will appear here.")
+
+
+def _render_book_map(chapters: list[dict[str, object]]) -> None:
+    st.markdown("### Detected Chapters")
+    if not chapters:
+        st.markdown("No chapters could be detected.")
+        st.markdown("Manual chapter review will be required before lessons.")
+    else:
+        for chapter in chapters:
+            st.markdown(
+                f"- **{chapter['chapter_number']}. {chapter['title']}** - "
+                f"Pages {chapter['start_page']}-{chapter['end_page']} - "
+                f"{chapter['confidence']} confidence"
+            )
+    st.markdown("Chapter lesson generation remains unavailable until boundaries are reviewed.")
 
 
 if __name__ == "__main__":

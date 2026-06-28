@@ -1,3 +1,8 @@
+from io import BytesIO
+
+from pypdf import PdfReader, PdfWriter
+
+
 def build_pdf_with_text_pages(page_texts: list[str]) -> bytes:
     objects: list[bytes] = []
     page_object_numbers: list[int] = []
@@ -57,3 +62,18 @@ def _assemble_pdf(objects: list[bytes]) -> bytes:
     )
 
     return bytes(body)
+
+
+def add_outline_to_pdf(pdf_bytes: bytes, outline_items: list[tuple[str, int]]) -> bytes:
+    reader = PdfReader(BytesIO(pdf_bytes))
+    writer = PdfWriter()
+
+    for page in reader.pages:
+        writer.add_page(page)
+
+    for title, page_number in outline_items:
+        writer.add_outline_item(title, page_number - 1)
+
+    output = BytesIO()
+    writer.write(output)
+    return output.getvalue()

@@ -29,6 +29,16 @@ class ExtractionResult:
     retryable: bool = False
 
 
+@dataclass(frozen=True)
+class ChapterDetectionResult:
+    success: bool
+    message: str
+    summary: dict[str, Any]
+    chapters: list[dict[str, Any]]
+    book: dict[str, Any] | None = None
+    retryable: bool = False
+
+
 def get_uploaded_books(
     api_base_url: str,
     *,
@@ -94,6 +104,54 @@ def extract_pdf_text_from_api(
         )
 
 
+def detect_chapters_from_api(
+    api_base_url: str,
+    *,
+    book_id: int,
+    client: httpx.Client | None = None,
+) -> ChapterDetectionResult:
+    http_client = client or httpx.Client(timeout=10.0)
+    try:
+        response = http_client.post(f"{api_base_url.rstrip('/')}/books/{book_id}/chapter-detection")
+        if response.status_code == 200:
+            payload = response.json()
+            summary = payload["summary"]
+            chapters = payload["chapters"]
+            return ChapterDetectionResult(
+                success=True,
+                message=_format_chapter_detection_summary(summary),
+                summary=summary,
+                chapters=chapters,
+                book=payload["book"],
+            )
+
+        detail = response.json().get("detail", {})
+        if isinstance(detail, str):
+            return ChapterDetectionResult(
+                success=False,
+                message=detail,
+                summary={},
+                chapters=[],
+                retryable=True,
+            )
+
+        return ChapterDetectionResult(
+            success=False,
+            message="Chapter detection failed. Retry after text extraction completes.",
+            summary={},
+            chapters=[],
+            retryable=True,
+        )
+    except httpx.HTTPError:
+        return ChapterDetectionResult(
+            success=False,
+            message="Chapter detection failed. Check the FastAPI backend, then try again.",
+            summary={},
+            chapters=[],
+            retryable=True,
+        )
+
+
 def upload_pdf_to_api(
     api_base_url: str,
     *,
@@ -147,3 +205,12 @@ def _format_extraction_summary(summary: dict[str, int]) -> str:
         f"{summary['text_page_count']} with text, "
         f"{summary['blank_page_count']} blank."
     )
+
+
+def _format_chapter_detection_summary(summary: dict[str, Any]) -> str:
+    chapter_count = summary["chapter_count"]
+    confidence = summary["confidence"]
+    if chapter_count == 0:
+        return "No chapters could be detected. Manual chapter review will be required."
+
+    return f"Detected {chapter_count} chapters with {confidence} confidence."

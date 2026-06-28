@@ -2,7 +2,7 @@
 
 SmartRead is a private learning system for cited chapter lessons, active recall, and targeted review.
 
-## Issue #3 PDF Extraction Slice
+## Issue #4 Chapter Detection Slice
 
 Start the FastAPI backend:
 
@@ -23,7 +23,11 @@ If the backend is not running, the Streamlit app shows a recoverable FastAPI una
 
 The Streamlit shell accepts PDF uploads only and sends the selected file to FastAPI. FastAPI validates that the file looks like a readable PDF, persists Uploaded Book metadata in SQLite, and stores the private PDF content for extraction.
 
-After upload, use **Extract text** on an Uploaded Book. FastAPI extracts text page by page, stores each page with its page number and source location, and returns an extraction summary. Blank pages are preserved as page records with empty text so page numbering stays stable. Chapter detection is not implemented yet.
+After upload, use **Extract text** on an Uploaded Book. FastAPI extracts text page by page, stores each page with its page number and source location, and returns an extraction summary. Blank pages are preserved as page records with empty text so page numbering stays stable.
+
+After extraction, use **Detect chapters**. FastAPI detects provisional chapters from PDF outline entries first, then heading patterns in the extracted page text. Detected Chapters are stored with titles, start and end page boundaries, source locations, confidence, and detection source. Streamlit shows the provisional Book Map, low-confidence warnings, and a clear empty state when no chapters are detected.
+
+Chapter editing and chapter lesson generation are not implemented yet.
 
 By default, metadata is saved at `.smartread/smartread.db`. To use another database file:
 
