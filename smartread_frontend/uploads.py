@@ -87,6 +87,33 @@ class QuizResult:
 
 
 @dataclass(frozen=True)
+class QuizAnswerResult:
+    success: bool
+    message: str
+    question_id: str
+    selected_answer: str | None = None
+    is_correct: bool | None = None
+    correct_answer: str | None = None
+    explanation: str | None = None
+    tested_concept: str | None = None
+    citation_id: str | None = None
+    source_location: str | None = None
+    page_number: int | None = None
+    source_excerpt: str | None = None
+    progress: dict[str, int] | None = None
+    retryable: bool = False
+
+
+@dataclass(frozen=True)
+class QuizProgressResult:
+    success: bool
+    message: str
+    progress: dict[str, int]
+    answers: list[dict[str, Any]]
+    retryable: bool = False
+
+
+@dataclass(frozen=True)
 class CitationEvidenceResult:
     success: bool
     message: str
@@ -555,6 +582,96 @@ def get_quiz_from_api(
         )
 
 
+def submit_quiz_answer_to_api(
+    api_base_url: str,
+    *,
+    book_id: int,
+    chapter_number: int,
+    question_id: str,
+    selected_answer: str,
+    client: httpx.Client | None = None,
+) -> QuizAnswerResult:
+    http_client = client or httpx.Client(timeout=10.0)
+    try:
+        response = http_client.post(
+            f"{api_base_url.rstrip('/')}/books/{book_id}/chapter-boundaries/"
+            f"{chapter_number}/quiz/answers/{question_id}",
+            json={"selected_answer": selected_answer},
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            return QuizAnswerResult(
+                success=True,
+                message=_format_quiz_answer_feedback_message(payload),
+                question_id=payload["question_id"],
+                selected_answer=payload["selected_answer"],
+                is_correct=payload["is_correct"],
+                correct_answer=payload["correct_answer"],
+                explanation=payload["explanation"],
+                tested_concept=payload["tested_concept"],
+                citation_id=payload["citation_id"],
+                source_location=payload["source_location"],
+                page_number=payload["page_number"],
+                source_excerpt=payload["source_excerpt"],
+                progress=payload["progress"],
+            )
+
+        detail = response.json().get("detail", {})
+        return QuizAnswerResult(
+            success=False,
+            message=detail if isinstance(detail, str) else "Answer feedback failed. Try again.",
+            question_id=question_id,
+            retryable=response.status_code != 404,
+        )
+    except httpx.HTTPError:
+        return QuizAnswerResult(
+            success=False,
+            message="Answer feedback failed. Check the FastAPI backend, then try again.",
+            question_id=question_id,
+            retryable=True,
+        )
+
+
+def get_quiz_progress_from_api(
+    api_base_url: str,
+    *,
+    book_id: int,
+    chapter_number: int,
+    client: httpx.Client | None = None,
+) -> QuizProgressResult:
+    http_client = client or httpx.Client(timeout=10.0)
+    try:
+        response = http_client.get(
+            f"{api_base_url.rstrip('/')}/books/{book_id}/chapter-boundaries/"
+            f"{chapter_number}/quiz/progress"
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            return QuizProgressResult(
+                success=True,
+                message="Quiz progress loaded.",
+                progress=payload["progress"],
+                answers=payload["answers"],
+            )
+
+        detail = response.json().get("detail", {})
+        return QuizProgressResult(
+            success=False,
+            message=detail if isinstance(detail, str) else "Quiz progress could not be loaded.",
+            progress={},
+            answers=[],
+            retryable=response.status_code != 404,
+        )
+    except httpx.HTTPError:
+        return QuizProgressResult(
+            success=False,
+            message="Quiz progress could not be loaded. Check the FastAPI backend, then try again.",
+            progress={},
+            answers=[],
+            retryable=True,
+        )
+
+
 def get_citation_evidence_from_api(
     api_base_url: str,
     *,
@@ -694,3 +811,7 @@ def _format_quiz_generation_message(chapter: dict[str, Any]) -> str:
 
 def _format_quiz_loaded_message(chapter: dict[str, Any]) -> str:
     return f"Quiz loaded for Chapter {chapter['chapter_number']}: {chapter['title']}."
+
+
+def _format_quiz_answer_feedback_message(payload: dict[str, Any]) -> str:
+    return "Correct." if payload["is_correct"] else "Incorrect."

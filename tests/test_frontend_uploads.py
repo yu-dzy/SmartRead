@@ -10,9 +10,11 @@ from smartread_frontend.uploads import (
     get_chapter_summary_from_api,
     get_citation_evidence_from_api,
     get_concepts_takeaways_from_api,
+    get_quiz_progress_from_api,
     get_quiz_from_api,
     get_uploaded_books,
     save_chapter_boundaries_to_api,
+    submit_quiz_answer_to_api,
     upload_pdf_to_api,
 )
 
@@ -726,6 +728,132 @@ def test_get_quiz_from_api_loads_saved_questions():
     assert result.quiz["questions"][0]["question_text"] == (
         "What does protected attention reduce during deliberate practice?"
     )
+
+
+def test_submit_quiz_answer_to_api_reports_immediate_feedback():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert (
+            str(request.url)
+            == "http://api.test/books/7/chapter-boundaries/1/quiz/answers/q1"
+        )
+        assert request.read() == b'{"selected_answer":"Long-term memory"}'
+        return httpx.Response(
+            200,
+            json={
+                "book_id": 7,
+                "chapter_number": 1,
+                "question_id": "q1",
+                "selected_answer": "Long-term memory",
+                "is_correct": False,
+                "correct_answer": "Constant switching",
+                "explanation": "Protected attention reduces constant switching.",
+                "tested_concept": "Protected Attention",
+                "citation_id": "qc1",
+                "source_location": "book:7:page:1",
+                "page_number": 1,
+                "source_excerpt": "Protected attention reduces constant switching.",
+                "progress": {
+                    "answered_count": 1,
+                    "correct_count": 0,
+                    "incorrect_count": 1,
+                    "total_questions": 5,
+                },
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = submit_quiz_answer_to_api(
+        "http://api.test",
+        book_id=7,
+        chapter_number=1,
+        question_id="q1",
+        selected_answer="Long-term memory",
+        client=client,
+    )
+
+    assert result.success is True
+    assert result.is_correct is False
+    assert result.correct_answer == "Constant switching"
+    assert result.tested_concept == "Protected Attention"
+    assert result.source_excerpt == "Protected attention reduces constant switching."
+    assert result.progress["incorrect_count"] == 1
+
+
+def test_submit_quiz_answer_to_api_reports_recoverable_backend_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("backend down", request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = submit_quiz_answer_to_api(
+        "http://api.test",
+        book_id=7,
+        chapter_number=1,
+        question_id="q1",
+        selected_answer="Long-term memory",
+        client=client,
+    )
+
+    assert result.success is False
+    assert result.retryable is True
+    assert result.message == "Answer feedback failed. Check the FastAPI backend, then try again."
+
+
+def test_get_quiz_progress_from_api_loads_saved_answers():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert str(request.url) == "http://api.test/books/7/chapter-boundaries/1/quiz/progress"
+        return httpx.Response(
+            200,
+            json={
+                "book_id": 7,
+                "chapter_number": 1,
+                "progress": {
+                    "answered_count": 1,
+                    "correct_count": 1,
+                    "incorrect_count": 0,
+                    "total_questions": 5,
+                },
+                "answers": [
+                    {
+                        "book_id": 7,
+                        "chapter_number": 1,
+                        "question_id": "q1",
+                        "selected_answer": "Constant switching",
+                        "is_correct": True,
+                        "correct_answer": "Constant switching",
+                        "explanation": "Protected attention reduces constant switching.",
+                        "tested_concept": "Protected Attention",
+                        "citation_id": "qc1",
+                        "source_location": "book:7:page:1",
+                        "page_number": 1,
+                        "source_excerpt": "Protected attention reduces constant switching.",
+                        "progress": {
+                            "answered_count": 1,
+                            "correct_count": 1,
+                            "incorrect_count": 0,
+                            "total_questions": 5,
+                        },
+                    }
+                ],
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = get_quiz_progress_from_api(
+        "http://api.test",
+        book_id=7,
+        chapter_number=1,
+        client=client,
+    )
+
+    assert result.success is True
+    assert result.progress["answered_count"] == 1
+    assert result.answers[0]["question_id"] == "q1"
+    assert result.answers[0]["is_correct"] is True
 
 
 def _quiz_payload() -> dict[str, object]:

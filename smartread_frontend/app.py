@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 
 import streamlit as st
 
@@ -14,9 +15,11 @@ try:
         get_chapter_summary_from_api,
         get_citation_evidence_from_api,
         get_concepts_takeaways_from_api,
+        get_quiz_progress_from_api,
         get_quiz_from_api,
         get_uploaded_books,
         save_chapter_boundaries_to_api,
+        submit_quiz_answer_to_api,
         upload_pdf_to_api,
     )
 except ModuleNotFoundError as error:
@@ -34,9 +37,11 @@ except ModuleNotFoundError as error:
         get_chapter_summary_from_api,
         get_citation_evidence_from_api,
         get_concepts_takeaways_from_api,
+        get_quiz_progress_from_api,
         get_quiz_from_api,
         get_uploaded_books,
         save_chapter_boundaries_to_api,
+        submit_quiz_answer_to_api,
         upload_pdf_to_api,
     )
 
@@ -175,7 +180,7 @@ def main() -> None:
         st.markdown("## Evidence")
         _render_evidence_panel(api_url=api_url)
         st.markdown("## Mastery")
-        st.markdown("Quiz progress and missed concepts will appear here.")
+        _render_mastery_panel()
 
 
 def _render_book_map(chapters: list[dict[str, object]]) -> None:
@@ -492,8 +497,16 @@ def _render_quiz_tab(*, api_url: str, books_result: object | None) -> None:
                 st.session_state[f"quiz_result_{book['id']}_{chapter_number}"] = result
 
             if result is not None:
+                progress_result = None
+                if result.success:
+                    progress_result = _load_quiz_progress_result(
+                        api_url=api_url,
+                        book_id=int(book["id"]),
+                        chapter_number=chapter_number,
+                    )
                 _render_quiz_result(
                     result,
+                    progress_result=progress_result,
                     api_url=api_url,
                     book_id=int(book["id"]),
                     chapter_number=chapter_number,
@@ -519,9 +532,27 @@ def _load_quiz_result(
     return st.session_state.get(result_key)
 
 
+def _load_quiz_progress_result(
+    *,
+    api_url: str,
+    book_id: int,
+    chapter_number: int,
+) -> object | None:
+    progress_key = f"quiz_progress_{book_id}_{chapter_number}"
+    if progress_key not in st.session_state:
+        st.session_state[progress_key] = get_quiz_progress_from_api(
+            api_url,
+            book_id=book_id,
+            chapter_number=chapter_number,
+        )
+
+    return st.session_state.get(progress_key)
+
+
 def _render_quiz_result(
     result: object,
     *,
+    progress_result: object | None,
     api_url: str,
     book_id: int,
     chapter_number: int,
@@ -535,12 +566,61 @@ def _render_quiz_result(
 
     st.success(result.message)
     st.markdown(result.message)
+    answers_by_question: dict[str, dict[str, object]] = {}
+    if progress_result is not None:
+        if progress_result.success:
+            st.session_state["current_quiz_progress"] = progress_result.progress
+            answers_by_question = {
+                str(answer["question_id"]): answer for answer in progress_result.answers
+            }
+        else:
+            st.error(progress_result.message)
+            st.markdown(progress_result.message)
+            if progress_result.retryable:
+                st.markdown("Retry loading quiz progress after FastAPI recovers.")
     for index, question in enumerate((result.quiz or {}).get("questions", []), start=1):
+        question_id = str(question["id"])
         st.markdown(f"**Question {index}: {question['question_text']}**")
         st.markdown(f"Type: {question['question_type']}")
         st.markdown(f"Tested concept: {question['tested_concept']}")
         for option in question["answer_options"]:
             st.markdown(f"- {option}")
+
+        saved_answer = answers_by_question.get(question_id)
+        if saved_answer is not None:
+            _render_quiz_answer_feedback(saved_answer)
+        else:
+            selected_answer = st.radio(
+                f"Answer for {question_id}",
+                question["answer_options"],
+                key=f"quiz_answer_{book_id}_{chapter_number}_{question_id}",
+            )
+            if st.button(
+                f"Submit answer {question_id}",
+                key=f"submit_quiz_answer_{book_id}_{chapter_number}_{question_id}",
+            ):
+                with st.spinner("Checking answer..."):
+                    answer_result = submit_quiz_answer_to_api(
+                        api_url,
+                        book_id=book_id,
+                        chapter_number=chapter_number,
+                        question_id=question_id,
+                        selected_answer=str(selected_answer),
+                    )
+                if answer_result.success:
+                    _store_quiz_answer_feedback(
+                        book_id=book_id,
+                        chapter_number=chapter_number,
+                        answer_result=answer_result,
+                    )
+                    st.session_state["current_quiz_progress"] = answer_result.progress or {}
+                    st.rerun()
+                else:
+                    st.error(answer_result.message)
+                    st.markdown(answer_result.message)
+                    if answer_result.retryable:
+                        st.markdown("Retry checking this answer after FastAPI recovers.")
+
         _render_citation_controls(
             api_url=api_url,
             book_id=book_id,
@@ -548,6 +628,81 @@ def _render_quiz_result(
             citation_ids=[question["citation_id"]],
             key_prefix=f"quiz_{index}",
         )
+
+
+def _store_quiz_answer_feedback(
+    *,
+    book_id: int,
+    chapter_number: int,
+    answer_result: object,
+) -> None:
+    progress_key = f"quiz_progress_{book_id}_{chapter_number}"
+    progress_result = st.session_state.get(progress_key)
+    answer = {
+        "question_id": answer_result.question_id,
+        "selected_answer": answer_result.selected_answer,
+        "is_correct": answer_result.is_correct,
+        "correct_answer": answer_result.correct_answer,
+        "explanation": answer_result.explanation,
+        "tested_concept": answer_result.tested_concept,
+        "citation_id": answer_result.citation_id,
+        "source_location": answer_result.source_location,
+        "page_number": answer_result.page_number,
+        "source_excerpt": answer_result.source_excerpt,
+        "progress": answer_result.progress,
+    }
+    if progress_result is None or not progress_result.success:
+        st.session_state[progress_key] = SimpleNamespace(
+            success=True,
+            message="Quiz progress loaded.",
+            progress=answer_result.progress or {},
+            answers=[answer],
+            retryable=False,
+        )
+        return
+
+    answers = [
+        existing
+        for existing in progress_result.answers
+        if existing.get("question_id") != answer_result.question_id
+    ]
+    answers.append(answer)
+    st.session_state[progress_key] = type(progress_result)(
+        success=True,
+        message=progress_result.message,
+        progress=answer_result.progress or progress_result.progress,
+        answers=answers,
+        retryable=False,
+    )
+
+
+def _render_quiz_answer_feedback(answer: dict[str, object]) -> None:
+    if answer["is_correct"]:
+        st.markdown("Correct.")
+    else:
+        st.markdown("Incorrect.")
+        st.markdown(f"Correct answer: {answer['correct_answer']}")
+
+    st.markdown(str(answer["explanation"]))
+    st.markdown(f"Tested concept: {answer['tested_concept']}")
+    if answer.get("citation_id"):
+        st.markdown(f"Citation {answer['citation_id']}")
+    if answer.get("page_number"):
+        st.markdown(f"Page {answer['page_number']}")
+    if answer.get("source_excerpt"):
+        st.markdown(f"Source excerpt: {answer['source_excerpt']}")
+
+
+def _render_mastery_panel() -> None:
+    progress = st.session_state.get("current_quiz_progress")
+    if not progress:
+        st.markdown("Quiz progress and missed concepts will appear here.")
+        return
+
+    st.markdown(f"Answered: {progress['answered_count']} of {progress['total_questions']}")
+    st.markdown(f"Correct: {progress['correct_count']}")
+    st.markdown(f"Incorrect: {progress['incorrect_count']}")
+    st.markdown("Missed-concept review will be generated in a later MVP slice.")
 
 
 def _load_accepted_chapters_for_summary(
