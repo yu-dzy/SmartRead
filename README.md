@@ -2,7 +2,7 @@
 
 SmartRead is a private learning system for cited chapter lessons, active recall, and targeted review.
 
-## Issue #1 App Shell
+## Issue #2 PDF Upload Slice
 
 Start the FastAPI backend:
 
@@ -20,6 +20,14 @@ C:\Users\douzh\.local\bin\uv.exe run streamlit run smartread_frontend/app.py --s
 Open `http://127.0.0.1:8502`.
 
 If the backend is not running, the Streamlit app shows a recoverable FastAPI unavailable state.
+
+The Streamlit shell accepts PDF uploads only and sends the selected file to FastAPI. FastAPI validates that the file looks like a readable PDF, persists Uploaded Book metadata in SQLite, and does not extract text yet.
+
+By default, metadata is saved at `.smartread/smartread.db`. To use another database file:
+
+```powershell
+$env:SMARTREAD_DB_PATH = "C:\tmp\smartread.db"
+```
 
 ## Development Checks
 
