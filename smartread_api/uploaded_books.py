@@ -62,6 +62,14 @@ class ChapterQuizNotFoundError(Exception):
     pass
 
 
+class QuizQuestionNotFoundError(Exception):
+    pass
+
+
+class QuizAnswerValidationError(Exception):
+    pass
+
+
 CHAPTER_HEADING_PATTERN = re.compile(
     r"^\s*(?:chapter|ch\.?)\s+(?P<label>[0-9ivxlcdm]+)\s*[:.\-]?\s*(?P<title>.+)?$",
     re.IGNORECASE,
@@ -823,6 +831,107 @@ class UploadedBookStore:
 
         return self._to_chapter_quiz(row, source["chapter"])
 
+    def submit_quiz_answer(
+        self,
+        book_id: int,
+        chapter_number: int,
+        question_id: str,
+        selected_answer: str,
+    ) -> dict[str, Any]:
+        selected_answer = selected_answer.strip()
+        if not selected_answer:
+            raise QuizAnswerValidationError("Choose an answer before checking it.")
+
+        quiz_record = self.get_chapter_quiz(book_id, chapter_number)
+        quiz = quiz_record["quiz"] or {}
+        question = self._find_quiz_question(quiz, question_id)
+        if question is None:
+            raise QuizQuestionNotFoundError
+        if selected_answer not in question["answer_options"]:
+            raise QuizAnswerValidationError("Choose one of the saved answer options.")
+
+        citation = self._find_quiz_citation(quiz, question["citation_id"])
+        is_correct = self._normalize_answer(selected_answer) == self._normalize_answer(
+            question["correct_answer"]
+        )
+        submitted_at = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO quiz_answers (
+                    book_id,
+                    chapter_number,
+                    question_id,
+                    selected_answer,
+                    is_correct,
+                    submitted_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(book_id, chapter_number, question_id)
+                DO UPDATE SET
+                    selected_answer = excluded.selected_answer,
+                    is_correct = excluded.is_correct,
+                    submitted_at = excluded.submitted_at
+                """,
+                (
+                    book_id,
+                    chapter_number,
+                    question_id,
+                    selected_answer,
+                    int(is_correct),
+                    submitted_at,
+                ),
+            )
+            answer_rows = self._fetch_quiz_answer_rows(connection, book_id, chapter_number)
+
+        return self._build_quiz_answer_feedback(
+            book_id=book_id,
+            chapter_number=chapter_number,
+            question=question,
+            selected_answer=selected_answer,
+            is_correct=is_correct,
+            citation=citation,
+            progress=self._build_quiz_progress(answer_rows, total_questions=len(quiz["questions"])),
+        )
+
+    def get_quiz_progress(
+        self,
+        book_id: int,
+        chapter_number: int,
+    ) -> dict[str, Any]:
+        quiz_record = self.get_chapter_quiz(book_id, chapter_number)
+        quiz = quiz_record["quiz"] or {}
+
+        with self._connect() as connection:
+            answer_rows = self._fetch_quiz_answer_rows(connection, book_id, chapter_number)
+
+        progress = self._build_quiz_progress(answer_rows, total_questions=len(quiz["questions"]))
+        answers = []
+        for row in answer_rows:
+            question = self._find_quiz_question(quiz, row["question_id"])
+            if question is None:
+                continue
+
+            answers.append(
+                self._build_quiz_answer_feedback(
+                    book_id=book_id,
+                    chapter_number=chapter_number,
+                    question=question,
+                    selected_answer=row["selected_answer"],
+                    is_correct=bool(row["is_correct"]),
+                    citation=self._find_quiz_citation(quiz, question["citation_id"]),
+                    progress=progress,
+                )
+            )
+
+        return {
+            "book_id": book_id,
+            "chapter_number": chapter_number,
+            "progress": progress,
+            "answers": answers,
+        }
+
     def _save_pdf_metadata(
         self,
         *,
@@ -1034,6 +1143,21 @@ class UploadedBookStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS quiz_answers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    book_id INTEGER NOT NULL,
+                    chapter_number INTEGER NOT NULL,
+                    question_id TEXT NOT NULL,
+                    selected_answer TEXT NOT NULL,
+                    is_correct INTEGER NOT NULL,
+                    submitted_at TEXT NOT NULL,
+                    UNIQUE(book_id, chapter_number, question_id),
+                    FOREIGN KEY(book_id) REFERENCES uploaded_books(id)
+                )
+                """
+            )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)
@@ -1162,6 +1286,87 @@ class UploadedBookStore:
             "generated_at": row["generated_at"],
             "quiz": json.loads(quiz_json) if quiz_json else None,
         }
+
+    def _find_quiz_question(
+        self,
+        quiz: dict[str, Any],
+        question_id: str,
+    ) -> dict[str, Any] | None:
+        for question in quiz.get("questions", []):
+            if question.get("id") == question_id:
+                return question
+        return None
+
+    def _find_quiz_citation(
+        self,
+        quiz: dict[str, Any],
+        citation_id: str,
+    ) -> dict[str, Any] | None:
+        for citation in quiz.get("citations", []):
+            if citation.get("id") == citation_id:
+                return citation
+        return None
+
+    def _fetch_quiz_answer_rows(
+        self,
+        connection: sqlite3.Connection,
+        book_id: int,
+        chapter_number: int,
+    ) -> list[sqlite3.Row]:
+        return connection.execute(
+            """
+            SELECT question_id, selected_answer, is_correct, submitted_at
+            FROM quiz_answers
+            WHERE book_id = ? AND chapter_number = ?
+            ORDER BY submitted_at, question_id
+            """,
+            (book_id, chapter_number),
+        ).fetchall()
+
+    def _build_quiz_answer_feedback(
+        self,
+        *,
+        book_id: int,
+        chapter_number: int,
+        question: dict[str, Any],
+        selected_answer: str,
+        is_correct: bool,
+        citation: dict[str, Any] | None,
+        progress: dict[str, int],
+    ) -> dict[str, Any]:
+        return {
+            "book_id": book_id,
+            "chapter_number": chapter_number,
+            "question_id": question["id"],
+            "selected_answer": selected_answer,
+            "is_correct": is_correct,
+            "correct_answer": question["correct_answer"],
+            "explanation": question["explanation"],
+            "tested_concept": question["tested_concept"],
+            "citation_id": question["citation_id"],
+            "source_location": citation["source_location"] if citation else None,
+            "page_number": citation["page_number"] if citation else None,
+            "source_excerpt": citation["source_excerpt"] if citation else None,
+            "progress": progress,
+        }
+
+    def _build_quiz_progress(
+        self,
+        answer_rows: list[sqlite3.Row],
+        *,
+        total_questions: int,
+    ) -> dict[str, int]:
+        correct_count = sum(1 for row in answer_rows if bool(row["is_correct"]))
+        answered_count = len(answer_rows)
+        return {
+            "answered_count": answered_count,
+            "correct_count": correct_count,
+            "incorrect_count": answered_count - correct_count,
+            "total_questions": total_questions,
+        }
+
+    def _normalize_answer(self, answer: str) -> str:
+        return " ".join(answer.strip().casefold().split())
 
     def _save_failed_chapter_summary(
         self,

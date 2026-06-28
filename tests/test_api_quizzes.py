@@ -141,6 +141,160 @@ def test_resolve_persisted_quiz_citation_to_evidence_after_restart(tmp_path):
     }
 
 
+def test_submit_correct_quiz_answer_returns_immediate_feedback(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    client = TestClient(
+        create_app(
+            database_path=tmp_path / "smartread.db",
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+
+    response = client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Constant switching"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "book_id": book_id,
+        "chapter_number": 1,
+        "question_id": "q1",
+        "selected_answer": "Constant switching",
+        "is_correct": True,
+        "correct_answer": "Constant switching",
+        "explanation": (
+            "Protected attention reduces constant switching so deliberate practice is "
+            "easier to repeat."
+        ),
+        "tested_concept": "Protected Attention",
+        "citation_id": "qc1",
+        "source_location": f"book:{book_id}:page:1",
+        "page_number": 1,
+        "source_excerpt": (
+            "Deep focus protects attention from constant switching so learners can "
+            "practice deliberately."
+        ),
+        "progress": {
+            "answered_count": 1,
+            "correct_count": 1,
+            "incorrect_count": 0,
+            "total_questions": 5,
+        },
+    }
+
+
+def test_submit_incorrect_quiz_answer_shows_correct_answer_and_evidence(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    client = TestClient(
+        create_app(
+            database_path=tmp_path / "smartread.db",
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+
+    response = client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Long-term memory"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["is_correct"] is False
+    assert payload["selected_answer"] == "Long-term memory"
+    assert payload["correct_answer"] == "Constant switching"
+    assert payload["explanation"] == (
+        "Protected attention reduces constant switching so deliberate practice is "
+        "easier to repeat."
+    )
+    assert payload["tested_concept"] == "Protected Attention"
+    assert payload["citation_id"] == "qc1"
+    assert payload["source_excerpt"] == (
+        "Deep focus protects attention from constant switching so learners can "
+        "practice deliberately."
+    )
+    assert payload["progress"] == {
+        "answered_count": 1,
+        "correct_count": 0,
+        "incorrect_count": 1,
+        "total_questions": 5,
+    }
+
+
+def test_quiz_progress_reloads_after_restart_without_duplicate_answer_records(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    database_path = tmp_path / "smartread.db"
+    client = TestClient(
+        create_app(
+            database_path=database_path,
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Long-term memory"},
+    )
+    client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/q1",
+        json={"selected_answer": "Long-term memory"},
+    )
+
+    reloaded_client = TestClient(
+        create_app(
+            database_path=database_path,
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+        )
+    )
+    response = reloaded_client.get(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/progress"
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["progress"] == {
+        "answered_count": 1,
+        "correct_count": 0,
+        "incorrect_count": 1,
+        "total_questions": 5,
+    }
+    assert len(payload["answers"]) == 1
+    assert payload["answers"][0]["question_id"] == "q1"
+    assert payload["answers"][0]["selected_answer"] == "Long-term memory"
+    assert payload["answers"][0]["is_correct"] is False
+    assert payload["answers"][0]["correct_answer"] == "Constant switching"
+
+
+def test_submit_quiz_answer_rejects_invalid_question_id(tmp_path):
+    quiz_generator = FakeQuizGenerator(_valid_quiz_output())
+    client = TestClient(
+        create_app(
+            database_path=tmp_path / "smartread.db",
+            concepts_generator=FakeConceptsTakeawaysGenerator(),
+            quiz_generator=quiz_generator,
+        )
+    )
+    book_id = _upload_extract_accept_and_generate_concepts(client)
+    client.post(f"/books/{book_id}/chapter-boundaries/1/quiz")
+
+    response = client.post(
+        f"/books/{book_id}/chapter-boundaries/1/quiz/answers/not-a-question",
+        json={"selected_answer": "Constant switching"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Quiz question was not found."
+
+
 def test_malformed_quiz_output_is_rejected_as_retryable_failure(tmp_path):
     output = _valid_quiz_output()
     output["questions"][0].pop("correct_answer")  # type: ignore[index]

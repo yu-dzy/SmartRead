@@ -12,6 +12,8 @@ from smartread_frontend.uploads import (
     CitationEvidenceResult,
     ConceptsTakeawaysResult,
     ExtractionResult,
+    QuizAnswerResult,
+    QuizProgressResult,
     QuizResult,
     UploadResult,
 )
@@ -30,6 +32,25 @@ def _empty_quiz_result(
         success=False,
         message="Quiz has not been generated yet.",
         retryable=False,
+    )
+
+
+def _empty_quiz_progress_result(
+    api_base_url: str,
+    *,
+    book_id: int,
+    chapter_number: int,
+) -> QuizProgressResult:
+    return QuizProgressResult(
+        success=True,
+        message="Quiz progress loaded.",
+        progress={
+            "answered_count": 0,
+            "correct_count": 0,
+            "incorrect_count": 0,
+            "total_questions": 5,
+        },
+        answers=[],
     )
 
 
@@ -1757,6 +1778,7 @@ def test_streamlit_generates_five_quiz_questions_without_grading(monkeypatch):
         fake_get_concepts_takeaways_from_api,
     )
     monkeypatch.setattr(uploads_module, "get_quiz_from_api", fake_get_quiz_from_api)
+    monkeypatch.setattr(uploads_module, "get_quiz_progress_from_api", _empty_quiz_progress_result)
     monkeypatch.setattr(uploads_module, "generate_quiz_from_api", fake_generate_quiz_from_api)
 
     app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
@@ -1853,6 +1875,7 @@ def test_streamlit_loads_persisted_quiz_questions(monkeypatch):
     monkeypatch.setattr(uploads_module, "get_chapter_summary_from_api", _empty_summary_result)
     monkeypatch.setattr(uploads_module, "get_concepts_takeaways_from_api", _empty_concepts_result)
     monkeypatch.setattr(uploads_module, "get_quiz_from_api", fake_get_quiz_from_api)
+    monkeypatch.setattr(uploads_module, "get_quiz_progress_from_api", _empty_quiz_progress_result)
 
     app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
     app = AppTest.from_file(str(app_path))
@@ -1863,6 +1886,384 @@ def test_streamlit_loads_persisted_quiz_questions(monkeypatch):
     assert "Quiz loaded for Chapter 1: Persisted Quiz." in page_text
     assert "What does protected attention reduce?" in page_text
     assert "Tested concept: Protected Attention" in page_text
+
+
+def test_streamlit_reloads_persisted_quiz_progress(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 24,
+            "original_filename": "saved-progress.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 24,
+            "chapter_number": 1,
+            "title": "Saved Progress",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:24:page:1",
+            "end_source_location": "book:24:page:2",
+            "review_status": "accepted",
+        }
+    ]
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    def fake_get_quiz_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> QuizResult:
+        return QuizResult(
+            success=True,
+            message="Quiz loaded for Chapter 1: Saved Progress.",
+            chapter=accepted_chapters[0],
+            generation_status="generated",
+            quiz=_sample_quiz_content(),
+        )
+
+    def fake_get_quiz_progress_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> QuizProgressResult:
+        return QuizProgressResult(
+            success=True,
+            message="Quiz progress loaded.",
+            progress={
+                "answered_count": 1,
+                "correct_count": 1,
+                "incorrect_count": 0,
+                "total_questions": 5,
+            },
+            answers=[
+                {
+                    "question_id": "q1",
+                    "selected_answer": "Constant switching",
+                    "is_correct": True,
+                    "correct_answer": "Constant switching",
+                    "explanation": "Protected attention reduces constant switching.",
+                    "tested_concept": "Protected Attention",
+                    "citation_id": "qc1",
+                    "source_location": "book:24:page:1",
+                    "page_number": 1,
+                    "source_excerpt": "Protected attention reduces constant switching.",
+                    "progress": {
+                        "answered_count": 1,
+                        "correct_count": 1,
+                        "incorrect_count": 0,
+                        "total_questions": 5,
+                    },
+                }
+            ],
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(uploads_module, "get_chapter_summary_from_api", _empty_summary_result)
+    monkeypatch.setattr(uploads_module, "get_concepts_takeaways_from_api", _empty_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", fake_get_quiz_from_api)
+    monkeypatch.setattr(uploads_module, "get_quiz_progress_from_api", fake_get_quiz_progress_from_api)
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert "Quiz loaded for Chapter 1: Saved Progress." in page_text
+    assert "Correct." in page_text
+    assert "Source excerpt: Protected attention reduces constant switching." in page_text
+    assert "Answered: 1 of 5" in page_text
+    assert "Correct: 1" in page_text
+    assert "Incorrect: 0" in page_text
+
+
+def test_streamlit_submits_quiz_answer_and_updates_mastery(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 23,
+            "original_filename": "feedback-quiz.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 23,
+            "chapter_number": 1,
+            "title": "Feedback Quiz",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:23:page:1",
+            "end_source_location": "book:23:page:2",
+            "review_status": "accepted",
+        }
+    ]
+    submitted: dict[str, object] = {}
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    def fake_get_quiz_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> QuizResult:
+        return QuizResult(
+            success=True,
+            message="Quiz loaded for Chapter 1: Feedback Quiz.",
+            chapter=accepted_chapters[0],
+            generation_status="generated",
+            quiz=_sample_quiz_content(),
+        )
+
+    def fake_submit_quiz_answer_to_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+        question_id: str,
+        selected_answer: str,
+    ) -> QuizAnswerResult:
+        submitted.update(
+            {
+                "book_id": book_id,
+                "chapter_number": chapter_number,
+                "question_id": question_id,
+                "selected_answer": selected_answer,
+            }
+        )
+        return QuizAnswerResult(
+            success=True,
+            message="Incorrect.",
+            question_id=question_id,
+            selected_answer=selected_answer,
+            is_correct=False,
+            correct_answer="Constant switching",
+            explanation="Protected attention reduces constant switching.",
+            tested_concept="Protected Attention",
+            citation_id="qc1",
+            source_location="book:23:page:1",
+            page_number=1,
+            source_excerpt="Protected attention reduces constant switching.",
+            progress={
+                "answered_count": 1,
+                "correct_count": 0,
+                "incorrect_count": 1,
+                "total_questions": 5,
+            },
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(uploads_module, "get_chapter_summary_from_api", _empty_summary_result)
+    monkeypatch.setattr(uploads_module, "get_concepts_takeaways_from_api", _empty_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", fake_get_quiz_from_api)
+    monkeypatch.setattr(uploads_module, "get_quiz_progress_from_api", _empty_quiz_progress_result)
+    monkeypatch.setattr(uploads_module, "submit_quiz_answer_to_api", fake_submit_quiz_answer_to_api)
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    answer_radio = next(radio for radio in app.radio if radio.label == "Answer for q1")
+    answer_radio.set_value("Long-term memory")
+    submit_button = next(button for button in app.button if button.label == "Submit answer q1")
+    submit_button.click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert submitted == {
+        "book_id": 23,
+        "chapter_number": 1,
+        "question_id": "q1",
+        "selected_answer": "Long-term memory",
+    }
+    assert "Incorrect." in page_text
+    assert "Correct answer: Constant switching" in page_text
+    assert "Protected attention reduces constant switching." in page_text
+    assert "Tested concept: Protected Attention" in page_text
+    assert "Source excerpt: Protected attention reduces constant switching." in page_text
+    assert "Answered: 1 of 5" in page_text
+    assert "Correct: 0" in page_text
+    assert "Incorrect: 1" in page_text
+
+
+def test_streamlit_shows_recoverable_quiz_answer_feedback_failure(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 25,
+            "original_filename": "feedback-failure.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 25,
+            "chapter_number": 1,
+            "title": "Feedback Failure",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:25:page:1",
+            "end_source_location": "book:25:page:2",
+            "review_status": "accepted",
+        }
+    ]
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    def fake_get_quiz_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> QuizResult:
+        return QuizResult(
+            success=True,
+            message="Quiz loaded for Chapter 1: Feedback Failure.",
+            chapter=accepted_chapters[0],
+            generation_status="generated",
+            quiz=_sample_quiz_content(),
+        )
+
+    def fake_submit_quiz_answer_to_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+        question_id: str,
+        selected_answer: str,
+    ) -> QuizAnswerResult:
+        return QuizAnswerResult(
+            success=False,
+            message="Answer feedback failed. Check the FastAPI backend, then try again.",
+            question_id=question_id,
+            retryable=True,
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(uploads_module, "get_chapter_summary_from_api", _empty_summary_result)
+    monkeypatch.setattr(uploads_module, "get_concepts_takeaways_from_api", _empty_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", fake_get_quiz_from_api)
+    monkeypatch.setattr(uploads_module, "get_quiz_progress_from_api", _empty_quiz_progress_result)
+    monkeypatch.setattr(uploads_module, "submit_quiz_answer_to_api", fake_submit_quiz_answer_to_api)
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    answer_radio = next(radio for radio in app.radio if radio.label == "Answer for q1")
+    answer_radio.set_value("Long-term memory")
+    submit_button = next(button for button in app.button if button.label == "Submit answer q1")
+    submit_button.click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert "Answer feedback failed. Check the FastAPI backend, then try again." in page_text
+    assert "Retry checking this answer after FastAPI recovers." in page_text
 
 
 def test_streamlit_shows_retryable_quiz_generation_failure(monkeypatch):
