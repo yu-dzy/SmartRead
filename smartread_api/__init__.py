@@ -1,0 +1,1 @@
+"""SmartRead FastAPI application package."""
