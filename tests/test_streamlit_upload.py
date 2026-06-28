@@ -2439,6 +2439,358 @@ def test_streamlit_review_tab_loads_missed_concepts(monkeypatch):
     assert "Source excerpt: Protected attention reduces constant switching." in page_text
 
 
+def test_streamlit_review_tab_retries_only_missed_questions(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 28,
+            "original_filename": "retry-missed.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 28,
+            "chapter_number": 1,
+            "title": "Retry Misses",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:28:page:1",
+            "end_source_location": "book:28:page:2",
+            "review_status": "accepted",
+        }
+    ]
+    retried: dict[str, object] = {}
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    def fake_get_quiz_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> QuizResult:
+        return QuizResult(
+            success=True,
+            message="Quiz loaded for Chapter 1: Retry Misses.",
+            chapter=accepted_chapters[0],
+            generation_status="generated",
+            quiz=_sample_quiz_content(),
+        )
+
+    def fake_get_quiz_progress_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> QuizProgressResult:
+        return QuizProgressResult(
+            success=True,
+            message="Quiz progress loaded.",
+            progress={
+                "answered_count": 1,
+                "correct_count": 0,
+                "incorrect_count": 1,
+                "total_questions": 5,
+            },
+            answers=[
+                {
+                    "question_id": "q1",
+                    "selected_answer": "Long-term memory",
+                    "is_correct": False,
+                    "correct_answer": "Constant switching",
+                    "explanation": "Protected attention reduces constant switching.",
+                    "tested_concept": "Protected Attention",
+                    "citation_id": "qc1",
+                    "source_location": "book:28:page:1",
+                    "page_number": 1,
+                    "source_excerpt": "Protected attention reduces constant switching.",
+                    "progress": {
+                        "answered_count": 1,
+                        "correct_count": 0,
+                        "incorrect_count": 1,
+                        "total_questions": 5,
+                    },
+                }
+            ],
+        )
+
+    def fake_get_missed_concepts_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> MissedConceptsResult:
+        if retried:
+            return _empty_missed_concepts_result(
+                api_base_url,
+                book_id=book_id,
+                chapter_number=chapter_number,
+            )
+        return MissedConceptsResult(
+            success=True,
+            message="Missed Concepts loaded.",
+            summary={"missed_concept_count": 1},
+            missed_concepts=[
+                {
+                    "book_id": book_id,
+                    "chapter_number": chapter_number,
+                    "concept_name": "Protected Attention",
+                    "question_id": "q1",
+                    "quiz_answer_id": 3,
+                    "explanation": "Protected attention reduces constant switching.",
+                    "citation_id": "qc1",
+                    "source_location": "book:28:page:1",
+                    "page_number": 1,
+                    "source_excerpt": "Protected attention reduces constant switching.",
+                }
+            ],
+        )
+
+    def fake_retry_missed_question_to_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+        question_id: str,
+        selected_answer: str,
+    ) -> QuizAnswerResult:
+        retried.update(
+            {
+                "book_id": book_id,
+                "chapter_number": chapter_number,
+                "question_id": question_id,
+                "selected_answer": selected_answer,
+            }
+        )
+        return QuizAnswerResult(
+            success=True,
+            message="Correct.",
+            question_id=question_id,
+            selected_answer=selected_answer,
+            is_correct=True,
+            correct_answer="Constant switching",
+            explanation="Protected attention reduces constant switching.",
+            tested_concept="Protected Attention",
+            citation_id="qc1",
+            source_location="book:28:page:1",
+            page_number=1,
+            source_excerpt="Protected attention reduces constant switching.",
+            progress={
+                "answered_count": 1,
+                "correct_count": 1,
+                "incorrect_count": 0,
+                "total_questions": 5,
+            },
+            missed_concept_status="resolved",
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(uploads_module, "get_chapter_summary_from_api", _empty_summary_result)
+    monkeypatch.setattr(uploads_module, "get_concepts_takeaways_from_api", _empty_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", fake_get_quiz_from_api)
+    monkeypatch.setattr(uploads_module, "get_quiz_progress_from_api", fake_get_quiz_progress_from_api)
+    monkeypatch.setattr(uploads_module, "get_missed_concepts_from_api", fake_get_missed_concepts_from_api)
+    monkeypatch.setattr(uploads_module, "retry_missed_question_to_api", fake_retry_missed_question_to_api)
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+    assert "Retry answer for q1" in [radio.label for radio in app.radio]
+    assert "Retry answer for q2" not in [radio.label for radio in app.radio]
+    assert "Question: q1" in page_text
+
+    retry_radio = next(radio for radio in app.radio if radio.label == "Retry answer for q1")
+    retry_radio.set_value("Constant switching")
+    retry_button = next(button for button in app.button if button.label == "Retry missed question q1")
+    retry_button.click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert retried == {
+        "book_id": 28,
+        "chapter_number": 1,
+        "question_id": "q1",
+        "selected_answer": "Constant switching",
+    }
+    assert "Missed Concept resolved." in page_text
+    assert "Answered: 1 of 5" in page_text
+    assert "Correct: 1" in page_text
+    assert "Incorrect: 0" in page_text
+    assert "No missed concepts are due from checked answers." in page_text
+
+
+def test_streamlit_review_tab_shows_recoverable_retry_failure(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books: list[dict[str, object]] = [
+        {
+            "id": 29,
+            "original_filename": "retry-failure.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 29,
+            "chapter_number": 1,
+            "title": "Retry Failure",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:29:page:1",
+            "end_source_location": "book:29:page:2",
+            "review_status": "accepted",
+        }
+    ]
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    def fake_get_quiz_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> QuizResult:
+        return QuizResult(
+            success=True,
+            message="Quiz loaded for Chapter 1: Retry Failure.",
+            chapter=accepted_chapters[0],
+            generation_status="generated",
+            quiz=_sample_quiz_content(),
+        )
+
+    def fake_get_missed_concepts_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+    ) -> MissedConceptsResult:
+        return MissedConceptsResult(
+            success=True,
+            message="Missed Concepts loaded.",
+            summary={"missed_concept_count": 1},
+            missed_concepts=[
+                {
+                    "book_id": book_id,
+                    "chapter_number": chapter_number,
+                    "concept_name": "Protected Attention",
+                    "question_id": "q1",
+                    "quiz_answer_id": 3,
+                    "explanation": "Protected attention reduces constant switching.",
+                    "citation_id": "qc1",
+                    "source_location": "book:29:page:1",
+                    "page_number": 1,
+                    "source_excerpt": "Protected attention reduces constant switching.",
+                }
+            ],
+        )
+
+    def fake_retry_missed_question_to_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+        chapter_number: int,
+        question_id: str,
+        selected_answer: str,
+    ) -> QuizAnswerResult:
+        return QuizAnswerResult(
+            success=False,
+            message="Retry failed. Check the FastAPI backend, then try again.",
+            question_id=question_id,
+            retryable=True,
+        )
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(uploads_module, "get_chapter_summary_from_api", _empty_summary_result)
+    monkeypatch.setattr(uploads_module, "get_concepts_takeaways_from_api", _empty_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", fake_get_quiz_from_api)
+    monkeypatch.setattr(uploads_module, "get_quiz_progress_from_api", _empty_quiz_progress_result)
+    monkeypatch.setattr(uploads_module, "get_missed_concepts_from_api", fake_get_missed_concepts_from_api)
+    monkeypatch.setattr(uploads_module, "retry_missed_question_to_api", fake_retry_missed_question_to_api)
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    retry_radio = next(radio for radio in app.radio if radio.label == "Retry answer for q1")
+    retry_radio.set_value("Constant switching")
+    retry_button = next(button for button in app.button if button.label == "Retry missed question q1")
+    retry_button.click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert "Retry failed. Check the FastAPI backend, then try again." in page_text
+    assert "Retry this missed question after FastAPI recovers." in page_text
+    assert "Question: q1" in page_text
+
+
 def test_streamlit_review_tab_shows_recoverable_missed_concepts_error(monkeypatch):
     import smartread_frontend.health as health_module
     import smartread_frontend.uploads as uploads_module

@@ -70,6 +70,10 @@ class QuizAnswerValidationError(Exception):
     pass
 
 
+class MissedQuestionNotFoundError(Exception):
+    pass
+
+
 CHAPTER_HEADING_PATTERN = re.compile(
     r"^\s*(?:chapter|ch\.?)\s+(?P<label>[0-9ivxlcdm]+)\s*[:.\-]?\s*(?P<title>.+)?$",
     re.IGNORECASE,
@@ -946,6 +950,106 @@ class UploadedBookStore:
             "missed_concepts": missed_concepts,
         }
 
+    def retry_missed_question(
+        self,
+        book_id: int,
+        chapter_number: int,
+        question_id: str,
+        selected_answer: str,
+    ) -> dict[str, Any]:
+        selected_answer = selected_answer.strip()
+        if not selected_answer:
+            raise QuizAnswerValidationError("Choose an answer before retrying it.")
+
+        quiz_record = self.get_chapter_quiz(book_id, chapter_number)
+        quiz = quiz_record["quiz"] or {}
+        question = self._find_quiz_question(quiz, question_id)
+        if question is None:
+            raise QuizQuestionNotFoundError
+        if selected_answer not in question["answer_options"]:
+            raise QuizAnswerValidationError("Choose one of the saved answer options.")
+
+        citation = self._find_quiz_citation(quiz, question["citation_id"])
+        is_correct = self._normalize_answer(selected_answer) == self._normalize_answer(
+            question["correct_answer"]
+        )
+        submitted_at = datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+        with self._connect() as connection:
+            missed_concept = self._fetch_missed_concept_row(
+                connection,
+                book_id,
+                chapter_number,
+                question_id,
+            )
+            if missed_concept is None:
+                raise MissedQuestionNotFoundError
+
+            connection.execute(
+                """
+                INSERT INTO quiz_answers (
+                    book_id,
+                    chapter_number,
+                    question_id,
+                    selected_answer,
+                    is_correct,
+                    submitted_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(book_id, chapter_number, question_id)
+                DO UPDATE SET
+                    selected_answer = excluded.selected_answer,
+                    is_correct = excluded.is_correct,
+                    submitted_at = excluded.submitted_at
+                """,
+                (
+                    book_id,
+                    chapter_number,
+                    question_id,
+                    selected_answer,
+                    int(is_correct),
+                    submitted_at,
+                ),
+            )
+            answer_row = self._fetch_quiz_answer_row(
+                connection,
+                book_id,
+                chapter_number,
+                question_id,
+            )
+            if is_correct:
+                self._delete_missed_concept(
+                    connection,
+                    book_id,
+                    chapter_number,
+                    question_id,
+                )
+                missed_concept_status = "resolved"
+            else:
+                self._save_missed_concept(
+                    connection=connection,
+                    book_id=book_id,
+                    chapter_number=chapter_number,
+                    question=question,
+                    quiz_answer_id=answer_row["id"],
+                    citation=citation,
+                    created_at=submitted_at,
+                )
+                missed_concept_status = "active"
+
+            answer_rows = self._fetch_quiz_answer_rows(connection, book_id, chapter_number)
+
+        feedback = self._build_quiz_answer_feedback(
+            book_id=book_id,
+            chapter_number=chapter_number,
+            question=question,
+            selected_answer=selected_answer,
+            is_correct=is_correct,
+            citation=citation,
+            progress=self._build_quiz_progress(answer_rows, total_questions=len(quiz["questions"])),
+        )
+        return {**feedback, "missed_concept_status": missed_concept_status}
+
     def get_quiz_progress(
         self,
         book_id: int,
@@ -1424,6 +1528,37 @@ class UploadedBookStore:
             """,
             (book_id, chapter_number, question_id),
         ).fetchone()
+
+    def _fetch_missed_concept_row(
+        self,
+        connection: sqlite3.Connection,
+        book_id: int,
+        chapter_number: int,
+        question_id: str,
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            SELECT id, concept_name, question_id
+            FROM missed_concepts
+            WHERE book_id = ? AND chapter_number = ? AND question_id = ?
+            """,
+            (book_id, chapter_number, question_id),
+        ).fetchone()
+
+    def _delete_missed_concept(
+        self,
+        connection: sqlite3.Connection,
+        book_id: int,
+        chapter_number: int,
+        question_id: str,
+    ) -> None:
+        connection.execute(
+            """
+            DELETE FROM missed_concepts
+            WHERE book_id = ? AND chapter_number = ? AND question_id = ?
+            """,
+            (book_id, chapter_number, question_id),
+        )
 
     def _save_missed_concept(
         self,

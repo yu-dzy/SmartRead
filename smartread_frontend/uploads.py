@@ -101,6 +101,7 @@ class QuizAnswerResult:
     page_number: int | None = None
     source_excerpt: str | None = None
     progress: dict[str, int] | None = None
+    missed_concept_status: str | None = None
     retryable: bool = False
 
 
@@ -717,6 +718,57 @@ def get_missed_concepts_from_api(
             message="Missed Concepts could not be loaded. Check FastAPI, then try again.",
             summary={},
             missed_concepts=[],
+            retryable=True,
+        )
+
+
+def retry_missed_question_to_api(
+    api_base_url: str,
+    *,
+    book_id: int,
+    chapter_number: int,
+    question_id: str,
+    selected_answer: str,
+    client: httpx.Client | None = None,
+) -> QuizAnswerResult:
+    http_client = client or httpx.Client(timeout=10.0)
+    try:
+        response = http_client.post(
+            f"{api_base_url.rstrip('/')}/books/{book_id}/chapter-boundaries/"
+            f"{chapter_number}/missed-concepts/{question_id}/retry",
+            json={"selected_answer": selected_answer},
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            return QuizAnswerResult(
+                success=True,
+                message=_format_quiz_answer_feedback_message(payload),
+                question_id=payload["question_id"],
+                selected_answer=payload["selected_answer"],
+                is_correct=payload["is_correct"],
+                correct_answer=payload["correct_answer"],
+                explanation=payload["explanation"],
+                tested_concept=payload["tested_concept"],
+                citation_id=payload["citation_id"],
+                source_location=payload["source_location"],
+                page_number=payload["page_number"],
+                source_excerpt=payload["source_excerpt"],
+                progress=payload["progress"],
+                missed_concept_status=payload["missed_concept_status"],
+            )
+
+        detail = response.json().get("detail", {})
+        return QuizAnswerResult(
+            success=False,
+            message=detail if isinstance(detail, str) else "Retry failed. Try again.",
+            question_id=question_id,
+            retryable=response.status_code != 404,
+        )
+    except httpx.HTTPError:
+        return QuizAnswerResult(
+            success=False,
+            message="Retry failed. Check the FastAPI backend, then try again.",
+            question_id=question_id,
             retryable=True,
         )
 
