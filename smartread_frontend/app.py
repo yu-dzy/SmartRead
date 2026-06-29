@@ -62,6 +62,7 @@ PRIVATE_UPLOAD_NOTICE = (
     "Only upload books you own or have permission to use. "
     "SmartRead keeps this upload private for your personal learning workflow."
 )
+STUDY_TABS = ["Summary", "Core Concepts", "Key Takeaways", "Quiz", "Review"]
 
 
 def main() -> None:
@@ -202,7 +203,10 @@ def main() -> None:
     with center:
         st.markdown("## Chapter Lesson")
         summary_tab, concepts_tab, takeaways_tab, quiz_tab, review_tab = st.tabs(
-            ["Summary", "Core Concepts", "Key Takeaways", "Quiz", "Review"]
+            STUDY_TABS,
+            default=_selected_study_tab(),
+            key="study_tabs",
+            on_change="rerun",
         )
         with summary_tab:
             _render_summary_tab(api_url=api_url, books_result=books_result)
@@ -240,7 +244,7 @@ def _render_book_map(chapters: list[dict[str, object]]) -> None:
 def _render_my_books_dashboard(dashboard_result: object | None) -> None:
     st.markdown("### My Books")
     focus = st.session_state.get("study_focus")
-    if focus is not None:
+    if focus is not None and st.session_state.get("study_tabs") == focus["tab"]:
         st.markdown(f"Opened {focus['tab']} for Chapter {focus['chapter_number']}.")
 
     if dashboard_result is None:
@@ -291,11 +295,36 @@ def _render_my_books_dashboard(dashboard_result: object | None) -> None:
             f"Continue: {continue_target['label']}",
             key=f"continue_{book['id']}",
         ):
-            st.session_state["study_focus"] = continue_target
-            st.markdown(
-                f"Opened {continue_target['tab']} "
-                f"for Chapter {continue_target['chapter_number']}."
-            )
+            if _is_valid_navigation_target(continue_target):
+                st.session_state["study_focus"] = continue_target
+                st.session_state["study_tabs"] = continue_target["tab"]
+                st.markdown(
+                    f"Opened {continue_target['tab']} "
+                    f"for Chapter {continue_target['chapter_number']}."
+                )
+            else:
+                st.error("Continue target could not be opened. Refresh My Books and try again.")
+                st.markdown("Continue target could not be opened. Refresh My Books and try again.")
+
+
+def _selected_study_tab() -> str:
+    selected_tab = st.session_state.get("study_tabs")
+    if selected_tab in STUDY_TABS:
+        return str(selected_tab)
+    return "Summary"
+
+
+def _is_valid_navigation_target(target: object) -> bool:
+    if not isinstance(target, dict):
+        return False
+    if target.get("tab") not in STUDY_TABS:
+        return False
+    try:
+        int(target["book_id"])
+        int(target["chapter_number"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return True
 
 
 def _render_chapter_boundary_review(
