@@ -112,6 +112,10 @@ def create_app(
     def list_books(request: Request) -> dict[str, list[dict[str, object]]]:
         return {"books": store.list_uploaded_books(_owner_id_from_request(request))}
 
+    @app.get("/dashboard/books")
+    def list_dashboard_books(request: Request) -> dict[str, list[dict[str, object]]]:
+        return {"books": store.list_dashboard_books(_owner_id_from_request(request))}
+
     @app.delete("/books/{book_id}")
     def delete_book(book_id: int) -> dict[str, object]:
         try:

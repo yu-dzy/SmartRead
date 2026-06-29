@@ -12,6 +12,7 @@ from smartread_frontend.uploads import (
     ChapterSummaryResult,
     CitationEvidenceResult,
     ConceptsTakeawaysResult,
+    DashboardBooksResult,
     DeleteBookResult,
     ExtractionResult,
     MissedConceptsResult,
@@ -337,6 +338,141 @@ def test_streamlit_deletes_uploaded_book_and_shows_private_data_notice(monkeypat
     assert deleted == {"book_id": 42}
     assert "Uploaded Book and related learning data were deleted." in page_text
     assert "No uploaded books yet." in page_text
+
+
+def test_streamlit_shows_empty_my_books_dashboard(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=[])
+
+    def fake_get_dashboard_books_from_api(api_base_url: str) -> DashboardBooksResult:
+        return DashboardBooksResult(success=True, books=[])
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_dashboard_books_from_api",
+        fake_get_dashboard_books_from_api,
+    )
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+
+    assert "### My Books" in page_text
+    assert "No books yet. Upload a user-owned PDF to begin." in page_text
+
+
+def test_streamlit_shows_my_books_dashboard_and_continue_action(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books = [
+        {
+            "id": 7,
+            "original_filename": "learning.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    dashboard_books = [
+        {
+            "id": 7,
+            "title": "learning",
+            "author": None,
+            "original_filename": "learning.pdf",
+            "upload_status": "uploaded",
+            "analysis_status": "chapters_accepted",
+            "completed_chapter_count": 1,
+            "total_chapter_count": 2,
+            "latest_quiz_performance": {
+                "chapter_number": 1,
+                "answered_count": 5,
+                "correct_count": 4,
+                "incorrect_count": 1,
+                "total_questions": 5,
+                "score_percent": 80,
+            },
+            "chapter_mastery": {
+                "mastered_chapter_count": 0,
+                "chapter_count": 2,
+                "mastery_percent": 80,
+            },
+            "due_review_count": 1,
+            "continue_target": {
+                "type": "due_review",
+                "book_id": 7,
+                "chapter_number": 1,
+                "review_item_id": 3,
+                "tab": "Review",
+                "label": "Review Protected Attention",
+            },
+        }
+    ]
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_dashboard_books_from_api(api_base_url: str) -> DashboardBooksResult:
+        return DashboardBooksResult(success=True, books=dashboard_books)
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_dashboard_books_from_api",
+        fake_get_dashboard_books_from_api,
+    )
+    monkeypatch.setattr(uploads_module, "get_chapter_boundaries_from_api", lambda *_, **__: ChapterBoundaryListResult(success=True, chapters=[]))
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+    assert "**learning**" in page_text
+    assert "Upload: uploaded" in page_text
+    assert "Analysis: chapters_accepted" in page_text
+    assert "Chapters: 1 of 2 complete" in page_text
+    assert "Latest quiz: Chapter 1 - 4/5 correct (80%)" in page_text
+    assert "Mastery: 80%" in page_text
+    assert "Due reviews: 1" in page_text
+
+    continue_button = next(
+        button for button in app.button if button.label == "Continue: Review Protected Attention"
+    )
+    continue_button.click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+    assert "Opened Review for Chapter 1." in page_text
 
 
 def test_streamlit_extracts_uploaded_pdf_and_shows_summary(monkeypatch):

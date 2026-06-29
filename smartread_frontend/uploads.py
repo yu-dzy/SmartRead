@@ -20,6 +20,14 @@ class BookListResult:
 
 
 @dataclass(frozen=True)
+class DashboardBooksResult:
+    success: bool
+    books: list[dict[str, Any]]
+    message: str = ""
+    retryable: bool = False
+
+
+@dataclass(frozen=True)
 class DeleteBookResult:
     success: bool
     message: str
@@ -187,6 +195,25 @@ def get_uploaded_books(
             success=False,
             books=[],
             message="Uploaded books could not be loaded. Refresh after FastAPI is available.",
+        )
+
+
+def get_dashboard_books_from_api(
+    api_base_url: str,
+    *,
+    client: httpx.Client | None = None,
+) -> DashboardBooksResult:
+    http_client = client or httpx.Client(timeout=5.0)
+    try:
+        response = http_client.get(f"{api_base_url.rstrip('/')}/dashboard/books")
+        response.raise_for_status()
+        return DashboardBooksResult(success=True, books=response.json()["books"])
+    except httpx.HTTPError:
+        return DashboardBooksResult(
+            success=False,
+            books=[],
+            message="My Books dashboard could not be loaded. Check FastAPI, then try again.",
+            retryable=True,
         )
 
 

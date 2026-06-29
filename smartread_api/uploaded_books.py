@@ -150,6 +150,55 @@ class UploadedBookStore:
 
         return [self._to_uploaded_book(row) for row in rows]
 
+    def list_dashboard_books(self, owner_id: str = "local-user") -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM uploaded_books
+                WHERE owner_id = ?
+                ORDER BY uploaded_at DESC, id DESC
+                """,
+                (owner_id,),
+            ).fetchall()
+
+            dashboard_books = []
+            for row in rows:
+                book = self._to_uploaded_book(row)
+                accepted_chapters = self._dashboard_accepted_chapters(
+                    connection,
+                    book_id=int(book["id"]),
+                )
+                for chapter in accepted_chapters:
+                    self._repair_missing_review_items(
+                        connection=connection,
+                        book_id=int(book["id"]),
+                        chapter_number=int(chapter["chapter_number"]),
+                    )
+                detected_chapter_count = self._dashboard_detected_chapter_count(
+                    connection,
+                    book_id=int(book["id"]),
+                )
+                chapter_progress = self._dashboard_chapter_progress(
+                    connection,
+                    book_id=int(book["id"]),
+                    accepted_chapters=accepted_chapters,
+                )
+                due_review_items = self._dashboard_due_review_items(
+                    connection,
+                    book_id=int(book["id"]),
+                )
+                dashboard_books.append(
+                    self._to_dashboard_book(
+                        book,
+                        accepted_chapters=accepted_chapters,
+                        detected_chapter_count=detected_chapter_count,
+                        chapter_progress=chapter_progress,
+                        due_review_items=due_review_items,
+                    )
+                )
+
+        return dashboard_books
+
     def assert_uploaded_book_owner(self, book_id: int, owner_id: str) -> None:
         with self._connect() as connection:
             row = connection.execute(
@@ -1755,6 +1804,244 @@ class UploadedBookStore:
             "chapter_detection_confidence": row["chapter_detection_confidence"],
             "chapter_detection_message": row["chapter_detection_message"],
             "chapter_review_status": row["chapter_review_status"],
+        }
+
+    def _to_dashboard_book(
+        self,
+        book: dict[str, Any],
+        *,
+        accepted_chapters: list[dict[str, Any]],
+        detected_chapter_count: int,
+        chapter_progress: list[dict[str, Any]],
+        due_review_items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        total_chapter_count = len(accepted_chapters) or detected_chapter_count
+        completed_chapter_count = sum(1 for chapter in chapter_progress if chapter["is_completed"])
+        mastered_chapter_count = sum(1 for chapter in chapter_progress if chapter["is_mastered"])
+        total_answered = sum(chapter["answered_count"] for chapter in chapter_progress)
+        total_correct = sum(chapter["correct_count"] for chapter in chapter_progress)
+        mastery_percent = (
+            round((total_correct / total_answered) * 100)
+            if total_answered
+            else 0
+        )
+        return {
+            "id": book["id"],
+            "title": Path(str(book["original_filename"])).stem,
+            "author": None,
+            "original_filename": book["original_filename"],
+            "upload_status": book["upload_status"],
+            "analysis_status": self._dashboard_analysis_status(book),
+            "completed_chapter_count": completed_chapter_count,
+            "total_chapter_count": total_chapter_count,
+            "latest_quiz_performance": self._dashboard_latest_quiz_performance(
+                chapter_progress
+            ),
+            "chapter_mastery": {
+                "mastered_chapter_count": mastered_chapter_count,
+                "chapter_count": total_chapter_count,
+                "mastery_percent": mastery_percent,
+            },
+            "due_review_count": len(due_review_items),
+            "continue_target": self._dashboard_continue_target(
+                book,
+                accepted_chapters,
+                chapter_progress,
+                due_review_items,
+            ),
+        }
+
+    def _dashboard_analysis_status(self, book: dict[str, Any]) -> str:
+        if book["chapter_review_status"] == "accepted":
+            return "chapters_accepted"
+        if book["chapter_detection_status"] == "detected":
+            return "chapters_detected"
+        if book["chapter_detection_status"] == "not_detected":
+            return "chapter_detection_failed"
+        if book["processing_status"] == "extracted":
+            return "text_extracted"
+        return str(book["processing_status"])
+
+    def _dashboard_accepted_chapters(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        book_id: int,
+    ) -> list[dict[str, Any]]:
+        rows = connection.execute(
+            """
+            SELECT chapter_number, title
+            FROM accepted_chapters
+            WHERE book_id = ?
+            ORDER BY chapter_number
+            """,
+            (book_id,),
+        ).fetchall()
+        return [{"chapter_number": row["chapter_number"], "title": row["title"]} for row in rows]
+
+    def _dashboard_detected_chapter_count(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        book_id: int,
+    ) -> int:
+        row = connection.execute(
+            "SELECT COUNT(*) AS chapter_count FROM detected_chapters WHERE book_id = ?",
+            (book_id,),
+        ).fetchone()
+        return int(row["chapter_count"])
+
+    def _dashboard_chapter_progress(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        book_id: int,
+        accepted_chapters: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        progress = []
+        for chapter in accepted_chapters:
+            chapter_number = int(chapter["chapter_number"])
+            quiz_row = connection.execute(
+                """
+                SELECT quiz_json
+                FROM chapter_quizzes
+                WHERE book_id = ?
+                  AND chapter_number = ?
+                  AND generation_status = 'generated'
+                """,
+                (book_id, chapter_number),
+            ).fetchone()
+            total_questions = 0
+            if quiz_row is not None and quiz_row["quiz_json"]:
+                quiz = json.loads(quiz_row["quiz_json"])
+                total_questions = len(quiz.get("questions", []))
+
+            answer_rows = self._fetch_quiz_answer_rows(connection, book_id, chapter_number)
+            answered_count = len(answer_rows)
+            correct_count = sum(1 for row in answer_rows if bool(row["is_correct"]))
+            submitted_values = [
+                str(row["submitted_at"])
+                for row in answer_rows
+                if row["submitted_at"] is not None
+            ]
+            progress.append(
+                {
+                    "chapter_number": chapter_number,
+                    "answered_count": answered_count,
+                    "correct_count": correct_count,
+                    "incorrect_count": answered_count - correct_count,
+                    "total_questions": total_questions,
+                    "is_completed": total_questions > 0 and answered_count >= total_questions,
+                    "is_mastered": total_questions > 0 and correct_count == total_questions,
+                    "last_answered_at": max(submitted_values) if submitted_values else None,
+                }
+            )
+
+        return progress
+
+    def _dashboard_latest_quiz_performance(
+        self,
+        chapter_progress: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        answered_chapters = [
+            chapter
+            for chapter in chapter_progress
+            if chapter["answered_count"] > 0
+        ]
+        if not answered_chapters:
+            return None
+
+        latest = max(
+            answered_chapters,
+            key=lambda chapter: str(chapter["last_answered_at"] or ""),
+        )
+        total_questions = int(latest["total_questions"])
+        correct_count = int(latest["correct_count"])
+        return {
+            "chapter_number": latest["chapter_number"],
+            "answered_count": latest["answered_count"],
+            "correct_count": correct_count,
+            "incorrect_count": latest["incorrect_count"],
+            "total_questions": total_questions,
+            "score_percent": (
+                round((correct_count / total_questions) * 100)
+                if total_questions
+                else 0
+            ),
+        }
+
+    def _dashboard_due_review_items(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        book_id: int,
+    ) -> list[dict[str, Any]]:
+        today = self._today_iso()
+        rows = connection.execute(
+            """
+            SELECT id, book_id, chapter_number, concept_name, due_on
+            FROM review_items
+            WHERE book_id = ?
+              AND status = 'active'
+              AND due_on <= ?
+            ORDER BY due_on, chapter_number, concept_name
+            """,
+            (book_id, today),
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "book_id": row["book_id"],
+                "chapter_number": row["chapter_number"],
+                "concept_name": row["concept_name"],
+                "due_on": row["due_on"],
+            }
+            for row in rows
+        ]
+
+    def _dashboard_continue_target(
+        self,
+        book: dict[str, Any],
+        accepted_chapters: list[dict[str, Any]],
+        chapter_progress: list[dict[str, Any]],
+        due_review_items: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        if due_review_items:
+            review_item = due_review_items[0]
+            return {
+                "type": "due_review",
+                "book_id": book["id"],
+                "chapter_number": review_item["chapter_number"],
+                "review_item_id": review_item["id"],
+                "tab": "Review",
+                "label": f"Review {review_item['concept_name']}",
+            }
+
+        if not accepted_chapters:
+            return None
+
+        completed_chapters = {
+            int(chapter["chapter_number"])
+            for chapter in chapter_progress
+            if chapter["is_completed"]
+        }
+        chapter = next(
+            (
+                accepted
+                for accepted in accepted_chapters
+                if int(accepted["chapter_number"]) not in completed_chapters
+            ),
+            None,
+        )
+        if chapter is None:
+            return None
+
+        return {
+            "type": "chapter",
+            "book_id": book["id"],
+            "chapter_number": chapter["chapter_number"],
+            "tab": "Summary",
+            "label": f"Continue Chapter {chapter['chapter_number']}: {chapter['title']}",
         }
 
     def _to_source_page(self, row: sqlite3.Row) -> dict[str, Any]:

@@ -16,6 +16,7 @@ try:
         get_chapter_summary_from_api,
         get_citation_evidence_from_api,
         get_concepts_takeaways_from_api,
+        get_dashboard_books_from_api,
         get_missed_concepts_from_api,
         get_quiz_progress_from_api,
         get_quiz_from_api,
@@ -43,6 +44,7 @@ except ModuleNotFoundError as error:
         get_chapter_summary_from_api,
         get_citation_evidence_from_api,
         get_concepts_takeaways_from_api,
+        get_dashboard_books_from_api,
         get_missed_concepts_from_api,
         get_quiz_progress_from_api,
         get_quiz_from_api,
@@ -68,6 +70,10 @@ def main() -> None:
     api_url = os.environ.get("SMARTREAD_API_URL", "http://127.0.0.1:8000")
     status = get_api_status(api_url)
     books_result = get_uploaded_books(api_url) if status.connected else None
+    dashboard_result = None
+    if status.connected:
+        with st.spinner("Loading My Books..."):
+            dashboard_result = get_dashboard_books_from_api(api_url)
 
     st.markdown("# SmartRead")
     st.markdown("A private learning system for cited chapter lessons and active recall.")
@@ -104,6 +110,7 @@ def main() -> None:
                     if upload_result.retryable:
                         st.markdown("You can retry with the same file or choose a replacement PDF.")
                 books_result = get_uploaded_books(api_url)
+                dashboard_result = get_dashboard_books_from_api(api_url)
 
         st.markdown("### Uploaded Books")
         if books_result is None:
@@ -139,6 +146,7 @@ def main() -> None:
                         if extraction_result.retryable:
                             st.markdown("Retry extraction or upload a cleaner PDF.")
                     books_result = get_uploaded_books(api_url)
+                    dashboard_result = get_dashboard_books_from_api(api_url)
                 if book.get("processing_status") == "extracted":
                     review_key = f"review_chapters_{book['id']}"
                     if st.button("Detect chapters", key=f"detect_{book['id']}"):
@@ -161,6 +169,7 @@ def main() -> None:
                             if detection_result.retryable:
                                 st.markdown("Retry chapter detection after text extraction.")
                         books_result = get_uploaded_books(api_url)
+                        dashboard_result = get_dashboard_books_from_api(api_url)
                     if review_key in st.session_state:
                         _render_book_map(st.session_state[review_key])
                         _render_chapter_boundary_review(
@@ -180,12 +189,15 @@ def main() -> None:
                         st.success(delete_result.message)
                         st.markdown(delete_result.message)
                         books_result = get_uploaded_books(api_url)
+                        dashboard_result = get_dashboard_books_from_api(api_url)
                         st.rerun()
                     else:
                         st.error(delete_result.message)
                         st.markdown(delete_result.message)
                         if delete_result.retryable:
                             st.markdown("Retry deleting this private upload after FastAPI recovers.")
+
+        _render_my_books_dashboard(dashboard_result)
 
     with center:
         st.markdown("## Chapter Lesson")
@@ -223,6 +235,67 @@ def _render_book_map(chapters: list[dict[str, object]]) -> None:
                 f"{chapter['confidence']} confidence"
             )
     st.markdown("Chapter lesson generation remains unavailable until boundaries are reviewed.")
+
+
+def _render_my_books_dashboard(dashboard_result: object | None) -> None:
+    st.markdown("### My Books")
+    focus = st.session_state.get("study_focus")
+    if focus is not None:
+        st.markdown(f"Opened {focus['tab']} for Chapter {focus['chapter_number']}.")
+
+    if dashboard_result is None:
+        st.markdown("Start FastAPI to load My Books.")
+        return
+
+    if not dashboard_result.success:
+        st.error(dashboard_result.message)
+        st.markdown(dashboard_result.message)
+        if dashboard_result.retryable:
+            st.markdown("Refresh after FastAPI is available.")
+        return
+
+    if not dashboard_result.books:
+        st.markdown("No books yet. Upload a user-owned PDF to begin.")
+        return
+
+    for book in dashboard_result.books:
+        st.markdown(f"**{book['title']}**")
+        if book.get("author"):
+            st.markdown(f"Author: {book['author']}")
+        st.markdown(f"Upload: {book['upload_status']}")
+        st.markdown(f"Analysis: {book['analysis_status']}")
+        st.markdown(
+            "Chapters: "
+            f"{book['completed_chapter_count']} of {book['total_chapter_count']} complete"
+        )
+        latest_quiz = book.get("latest_quiz_performance")
+        if latest_quiz:
+            st.markdown(
+                "Latest quiz: "
+                f"Chapter {latest_quiz['chapter_number']} - "
+                f"{latest_quiz['correct_count']}/{latest_quiz['total_questions']} "
+                f"correct ({latest_quiz['score_percent']}%)"
+            )
+        else:
+            st.markdown("Latest quiz: not started")
+        mastery = book["chapter_mastery"]
+        st.markdown(f"Mastery: {mastery['mastery_percent']}%")
+        st.markdown(f"Due reviews: {book['due_review_count']}")
+
+        continue_target = book.get("continue_target")
+        if continue_target is None:
+            st.markdown("Continue unavailable until a chapter is ready.")
+            continue
+
+        if st.button(
+            f"Continue: {continue_target['label']}",
+            key=f"continue_{book['id']}",
+        ):
+            st.session_state["study_focus"] = continue_target
+            st.markdown(
+                f"Opened {continue_target['tab']} "
+                f"for Chapter {continue_target['chapter_number']}."
+            )
 
 
 def _render_chapter_boundary_review(
@@ -1035,9 +1108,13 @@ def _load_accepted_chapters_for_summary(
     if books_result is None or not getattr(books_result, "success", False):
         return []
 
+    focus = st.session_state.get("study_focus")
     accepted_chapters_by_book = []
     for book in books_result.books:
         book_id = int(book["id"])
+        if focus is not None and book_id != int(focus["book_id"]):
+            continue
+
         accepted_key = f"accepted_chapters_{book_id}"
         chapters = st.session_state.get(accepted_key)
         if chapters is None and book.get("chapter_review_status") == "accepted":
@@ -1052,6 +1129,13 @@ def _load_accepted_chapters_for_summary(
                 chapters = []
 
         if chapters:
+            if focus is not None:
+                focused_chapter_number = int(focus["chapter_number"])
+                chapters = [
+                    chapter
+                    for chapter in chapters
+                    if int(chapter["chapter_number"]) == focused_chapter_number
+                ]
             accepted_chapters_by_book.append((book, chapters))
 
     return accepted_chapters_by_book
