@@ -475,6 +475,364 @@ def test_streamlit_shows_my_books_dashboard_and_continue_action(monkeypatch):
     assert "Opened Review for Chapter 1." in page_text
 
 
+def test_streamlit_continue_due_review_opens_review_tab(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books = [
+        {
+            "id": 7,
+            "original_filename": "learning.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 7,
+            "chapter_number": 1,
+            "title": "Protected Attention",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:7:page:1",
+            "end_source_location": "book:7:page:2",
+            "review_status": "accepted",
+        }
+    ]
+    dashboard_books = [
+        {
+            "id": 7,
+            "title": "learning",
+            "author": None,
+            "original_filename": "learning.pdf",
+            "upload_status": "uploaded",
+            "analysis_status": "chapters_accepted",
+            "completed_chapter_count": 1,
+            "total_chapter_count": 2,
+            "latest_quiz_performance": {
+                "chapter_number": 1,
+                "answered_count": 5,
+                "correct_count": 4,
+                "incorrect_count": 1,
+                "total_questions": 5,
+                "score_percent": 80,
+            },
+            "chapter_mastery": {
+                "mastered_chapter_count": 0,
+                "chapter_count": 2,
+                "mastery_percent": 80,
+            },
+            "due_review_count": 1,
+            "continue_target": {
+                "type": "due_review",
+                "book_id": 7,
+                "chapter_number": 1,
+                "review_item_id": 3,
+                "tab": "Review",
+                "label": "Review Protected Attention",
+            },
+        }
+    ]
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_dashboard_books_from_api(api_base_url: str) -> DashboardBooksResult:
+        return DashboardBooksResult(success=True, books=dashboard_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_dashboard_books_from_api",
+        fake_get_dashboard_books_from_api,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(uploads_module, "get_chapter_summary_from_api", _empty_summary_result)
+    monkeypatch.setattr(uploads_module, "get_concepts_takeaways_from_api", _empty_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", _empty_quiz_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_progress_from_api", _empty_quiz_progress_result)
+    monkeypatch.setattr(uploads_module, "get_missed_concepts_from_api", _empty_missed_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_review_items_from_api", _empty_review_items_result)
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    assert app.tabs[0].label == "Summary"
+    assert app.tabs[4].label == "Review"
+    assert app.session_state["study_tabs"] == "Summary"
+    page_text = "\n".join(element.value for element in app.markdown)
+    assert "Opened Review for Chapter 1." not in page_text
+
+    continue_button = next(
+        button for button in app.button if button.label == "Continue: Review Protected Attention"
+    )
+    continue_button.click()
+    app.run(timeout=5)
+
+    assert app.tabs[4].label == "Review"
+    assert app.session_state["study_tabs"] == "Review"
+    assert app.session_state["study_focus"] == {
+        "type": "due_review",
+        "book_id": 7,
+        "chapter_number": 1,
+        "review_item_id": 3,
+        "tab": "Review",
+        "label": "Review Protected Attention",
+    }
+    page_text = "\n".join(element.value for element in app.markdown)
+    assert "Opened Review for Chapter 1." in page_text
+
+    app.run(timeout=5)
+
+    assert app.session_state["study_tabs"] == "Review"
+    assert app.session_state["study_focus"]["book_id"] == 7
+    assert app.session_state["study_focus"]["chapter_number"] == 1
+
+
+def test_streamlit_continue_next_unfinished_chapter_opens_summary_tab(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books = [
+        {
+            "id": 9,
+            "original_filename": "learning.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    accepted_chapters = [
+        {
+            "book_id": 9,
+            "chapter_number": 1,
+            "title": "Focus",
+            "start_page": 1,
+            "end_page": 2,
+            "start_source_location": "book:9:page:1",
+            "end_source_location": "book:9:page:2",
+            "review_status": "accepted",
+        },
+        {
+            "book_id": 9,
+            "chapter_number": 2,
+            "title": "Systems",
+            "start_page": 3,
+            "end_page": 4,
+            "start_source_location": "book:9:page:3",
+            "end_source_location": "book:9:page:4",
+            "review_status": "accepted",
+        },
+    ]
+    dashboard_books = [
+        {
+            "id": 9,
+            "title": "learning",
+            "author": None,
+            "original_filename": "learning.pdf",
+            "upload_status": "uploaded",
+            "analysis_status": "chapters_accepted",
+            "completed_chapter_count": 1,
+            "total_chapter_count": 2,
+            "latest_quiz_performance": None,
+            "chapter_mastery": {
+                "mastered_chapter_count": 0,
+                "chapter_count": 2,
+                "mastery_percent": 0,
+            },
+            "due_review_count": 0,
+            "continue_target": {
+                "type": "chapter",
+                "book_id": 9,
+                "chapter_number": 2,
+                "tab": "Summary",
+                "label": "Continue Chapter 2: Systems",
+            },
+        }
+    ]
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_dashboard_books_from_api(api_base_url: str) -> DashboardBooksResult:
+        return DashboardBooksResult(success=True, books=dashboard_books)
+
+    def fake_get_chapter_boundaries_from_api(
+        api_base_url: str,
+        *,
+        book_id: int,
+    ) -> ChapterBoundaryListResult:
+        return ChapterBoundaryListResult(success=True, chapters=accepted_chapters)
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_dashboard_books_from_api",
+        fake_get_dashboard_books_from_api,
+    )
+    monkeypatch.setattr(
+        uploads_module,
+        "get_chapter_boundaries_from_api",
+        fake_get_chapter_boundaries_from_api,
+    )
+    monkeypatch.setattr(uploads_module, "get_chapter_summary_from_api", _empty_summary_result)
+    monkeypatch.setattr(uploads_module, "get_concepts_takeaways_from_api", _empty_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_from_api", _empty_quiz_result)
+    monkeypatch.setattr(uploads_module, "get_quiz_progress_from_api", _empty_quiz_progress_result)
+    monkeypatch.setattr(uploads_module, "get_missed_concepts_from_api", _empty_missed_concepts_result)
+    monkeypatch.setattr(uploads_module, "get_review_items_from_api", _empty_review_items_result)
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    continue_button = next(
+        button for button in app.button if button.label == "Continue: Continue Chapter 2: Systems"
+    )
+    continue_button.click()
+    app.run(timeout=5)
+
+    assert app.session_state["study_tabs"] == "Summary"
+    assert app.session_state["study_focus"] == {
+        "type": "chapter",
+        "book_id": 9,
+        "chapter_number": 2,
+        "tab": "Summary",
+        "label": "Continue Chapter 2: Systems",
+    }
+    page_text = "\n".join(element.value for element in app.markdown)
+    assert "Opened Summary for Chapter 2." in page_text
+    assert "Chapter 2: Systems" in page_text
+
+
+def test_streamlit_continue_invalid_target_shows_recoverable_error(monkeypatch):
+    import smartread_frontend.health as health_module
+    import smartread_frontend.uploads as uploads_module
+
+    uploaded_books = [
+        {
+            "id": 10,
+            "original_filename": "bad-target.pdf",
+            "content_type": "application/pdf",
+            "file_size": len(PDF_BYTES),
+            "uploaded_at": "2026-06-28T07:00:00Z",
+            "upload_status": "uploaded",
+            "processing_status": "extracted",
+            "error_message": None,
+            "chapter_detection_status": "detected",
+            "chapter_detection_confidence": "high",
+            "chapter_detection_message": None,
+            "chapter_review_status": "accepted",
+        }
+    ]
+    dashboard_books = [
+        {
+            "id": 10,
+            "title": "bad-target",
+            "author": None,
+            "original_filename": "bad-target.pdf",
+            "upload_status": "uploaded",
+            "analysis_status": "chapters_accepted",
+            "completed_chapter_count": 0,
+            "total_chapter_count": 1,
+            "latest_quiz_performance": None,
+            "chapter_mastery": {
+                "mastered_chapter_count": 0,
+                "chapter_count": 1,
+                "mastery_percent": 0,
+            },
+            "due_review_count": 0,
+            "continue_target": {
+                "type": "chapter",
+                "book_id": 10,
+                "chapter_number": 1,
+                "tab": "Evidence",
+                "label": "Open unsupported tab",
+            },
+        }
+    ]
+
+    def fake_get_api_status(api_base_url: str) -> ApiStatus:
+        return ApiStatus(
+            connected=True,
+            heading="FastAPI connected",
+            detail="SmartRead API is available",
+        )
+
+    def fake_get_uploaded_books(api_base_url: str) -> BookListResult:
+        return BookListResult(success=True, books=uploaded_books)
+
+    def fake_get_dashboard_books_from_api(api_base_url: str) -> DashboardBooksResult:
+        return DashboardBooksResult(success=True, books=dashboard_books)
+
+    monkeypatch.setattr(health_module, "get_api_status", fake_get_api_status)
+    monkeypatch.setattr(uploads_module, "get_uploaded_books", fake_get_uploaded_books)
+    monkeypatch.setattr(
+        uploads_module,
+        "get_dashboard_books_from_api",
+        fake_get_dashboard_books_from_api,
+    )
+
+    app_path = Path(__file__).parents[1] / "smartread_frontend" / "app.py"
+    app = AppTest.from_file(str(app_path))
+    app.run(timeout=5)
+
+    continue_button = next(
+        button for button in app.button if button.label == "Continue: Open unsupported tab"
+    )
+    continue_button.click()
+    app.run(timeout=5)
+
+    page_text = "\n".join(element.value for element in app.markdown)
+    assert "Continue target could not be opened. Refresh My Books and try again." in page_text
+    assert "Opened Evidence for Chapter 1." not in page_text
+    with pytest.raises(KeyError):
+        app.session_state["study_focus"]
+
+
 def test_streamlit_extracts_uploaded_pdf_and_shows_summary(monkeypatch):
     import smartread_frontend.health as health_module
     import smartread_frontend.uploads as uploads_module
