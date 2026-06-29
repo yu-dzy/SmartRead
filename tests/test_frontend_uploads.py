@@ -11,6 +11,7 @@ from smartread_frontend.uploads import (
     get_chapter_summary_from_api,
     get_citation_evidence_from_api,
     get_concepts_takeaways_from_api,
+    get_dashboard_books_from_api,
     get_missed_concepts_from_api,
     get_quiz_progress_from_api,
     get_quiz_from_api,
@@ -93,6 +94,73 @@ def test_get_uploaded_books_returns_books_from_api():
 
     assert result.success is True
     assert result.books[0]["original_filename"] == "deep-work.pdf"
+
+
+def test_get_dashboard_books_from_api_returns_my_books_dashboard():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert str(request.url) == "http://api.test/dashboard/books"
+        return httpx.Response(
+            200,
+            json={
+                "books": [
+                    {
+                        "id": 7,
+                        "title": "learning",
+                        "author": None,
+                        "original_filename": "learning.pdf",
+                        "upload_status": "uploaded",
+                        "analysis_status": "chapters_accepted",
+                        "completed_chapter_count": 1,
+                        "total_chapter_count": 2,
+                        "latest_quiz_performance": {
+                            "chapter_number": 1,
+                            "answered_count": 5,
+                            "correct_count": 4,
+                            "incorrect_count": 1,
+                            "total_questions": 5,
+                            "score_percent": 80,
+                        },
+                        "chapter_mastery": {
+                            "mastered_chapter_count": 0,
+                            "chapter_count": 2,
+                            "mastery_percent": 80,
+                        },
+                        "due_review_count": 1,
+                        "continue_target": {
+                            "type": "due_review",
+                            "book_id": 7,
+                            "chapter_number": 1,
+                            "review_item_id": 3,
+                            "tab": "Review",
+                            "label": "Review Protected Attention",
+                        },
+                    }
+                ]
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = get_dashboard_books_from_api("http://api.test", client=client)
+
+    assert result.success is True
+    assert result.books[0]["title"] == "learning"
+    assert result.books[0]["due_review_count"] == 1
+
+
+def test_get_dashboard_books_from_api_reports_recoverable_backend_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("backend down", request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = get_dashboard_books_from_api("http://api.test", client=client)
+
+    assert result.success is False
+    assert result.books == []
+    assert result.retryable is True
+    assert result.message == "My Books dashboard could not be loaded. Check FastAPI, then try again."
 
 
 def test_delete_uploaded_book_from_api_reports_success():
